@@ -25,6 +25,8 @@ servingEngineSpec:
   modelSpec:
   # -- The name of the model.
   - name: "mistral"
+    # -- Enable verbose vLLM request/output debug args and full HTTP request/response logging middleware for this model only.
+    debug: false
     # -- Whether to deploy the model. it Default to true if not set
     enabled: false
     # -- The annotations to add to the deployment

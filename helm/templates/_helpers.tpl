@@ -81,6 +81,51 @@ Define additional router ports
 {{- end }}
 
 {{/*
+Define per-model debug args that can be appended to vLLM startup.
+*/}}
+{{- define "chart.vllmDebugArgs" -}}
+- "--enable-log-requests"
+- "--enable-log-outputs"
+- "--log-error-stack"
+- "--enable-logging-iteration-details"
+- "--middleware=vllm_http_debug.FullRequestLogger"
+- "--middleware=vllm_http_debug.FullResponseLogger"
+- "--max-log-len=10000"
+{{- end -}}
+
+{{/*
+Define per-model debug environment variables for vLLM startup.
+*/}}
+{{- define "chart.vllmDebugEnv" -}}
+- name: VLLM_LOGGING_LEVEL
+  value: "DEBUG"
+- name: PYTHONPATH
+  value: "/opt/vllm-debug:$(PYTHONPATH)"
+- name: VLLM_LOG_STATS_INTERVAL
+  value: "1"
+- name: VLLM_LOG_MODEL_INSPECTION
+  value: "1"
+{{- end -}}
+
+{{/*
+Define per-model debug middleware volume mounts.
+*/}}
+{{- define "chart.vllmDebugVolumeMounts" -}}
+- name: vllm-debug-middleware
+  mountPath: /opt/vllm-debug
+  readOnly: true
+{{- end -}}
+
+{{/*
+Define per-model debug middleware volumes.
+*/}}
+{{- define "chart.vllmDebugVolumes" -}}
+- name: vllm-debug-middleware
+  configMap:
+    name: "{{ .Release.Name }}-vllm-debug-middleware"
+{{- end -}}
+
+{{/*
 Define startup, liveness and readiness probes
 */}}
 {{- define "chart.templateProbe"}}

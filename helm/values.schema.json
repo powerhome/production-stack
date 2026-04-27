@@ -1089,6 +1089,11 @@
                                 "description": "The annotations to add to the deployment",
                                 "type": "object"
                             },
+                            "debug": {
+                                "default": false,
+                                "description": "Enable verbose vLLM request/output debug args and full HTTP request/response logging middleware for this model only.",
+                                "type": "boolean"
+                            },
                             "enableLoRA": {
                                 "description": "Whether to enable LoRA",
                                 "type": "boolean"

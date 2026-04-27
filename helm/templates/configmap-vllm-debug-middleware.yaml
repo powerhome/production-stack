@@ -1,0 +1,194 @@
+{{- $hasDebugModel := false -}}
+{{- range $modelSpec := .Values.servingEngineSpec.modelSpec }}
+{{- if and (hasKey $modelSpec "debug") $modelSpec.debug }}
+{{- $hasDebugModel = true -}}
+{{- end }}
+{{- end }}
+{{- if $hasDebugModel }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-vllm-debug-middleware"
+  namespace: {{ .Release.Namespace }}
+data:
+  vllm_http_debug.py: |-
+    import json
+    import logging
+    import os
+    from collections.abc import Iterator
+
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+
+    logger = logging.getLogger("vllm.debug.http")
+    DEFAULT_REDACT_HEADERS = "authorization,cookie,set-cookie,x-api-key"
+
+
+    def _max_body_bytes(kind: str) -> int:
+        raw_value = os.getenv(
+            f"VLLM_DEBUG_HTTP_{kind.upper()}_MAX_BYTES",
+            os.getenv("VLLM_DEBUG_HTTP_MAX_BYTES", "0"),
+        )
+        try:
+            return max(0, int(raw_value))
+        except ValueError:
+            return 0
+
+
+    def _headers_for_log(raw_headers: list[tuple[bytes, bytes]]) -> list[dict[str, str]]:
+        redact_headers = {
+            header.strip().lower()
+            for header in os.getenv(
+                "VLLM_DEBUG_HTTP_REDACT_HEADERS", DEFAULT_REDACT_HEADERS
+            ).split(",")
+            if header.strip()
+        }
+
+        headers = []
+        for raw_name, raw_value in raw_headers:
+            name = raw_name.decode("latin1")
+            value = raw_value.decode("latin1")
+            if name.lower() in redact_headers:
+                value = "<redacted>"
+            headers.append({"name": name, "value": value})
+        return headers
+
+
+    def _body_for_log(kind: str, body: bytes) -> tuple[str, int, bool]:
+        max_body_bytes = _max_body_bytes(kind)
+        truncated = max_body_bytes > 0 and len(body) > max_body_bytes
+        body_for_log = body[:max_body_bytes] if truncated else body
+        return body_for_log.decode("utf-8", "replace"), len(body), truncated
+
+
+    def _request_line(scope: Scope) -> str:
+        query_string = scope.get("query_string", b"").decode("latin1")
+        path = scope.get("path", "")
+        path_with_query = f"{path}?{query_string}" if query_string else path
+        return f"{scope.get('method')} {path_with_query} HTTP/{scope.get('http_version')}"
+
+
+    _SKIP_PATHS = {"/health", "/metrics"}
+
+
+    def _should_skip(scope: Scope) -> bool:
+        path = (scope.get("path", "") or "").rstrip("/") or "/"
+        root_path = (scope.get("root_path", "") or "").rstrip("/")
+        return path in _SKIP_PATHS or any(
+            root_path and path == f"{root_path}{skip_path}"
+            for skip_path in _SKIP_PATHS
+        )
+
+
+    class FullRequestLogger:
+        def __init__(self, app: ASGIApp):
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send):
+            if scope["type"] != "http" or _should_skip(scope):
+                await self.app(scope, receive, send)
+                return
+
+            request_messages: list[Message] = []
+            body_parts: list[bytes] = []
+
+            while True:
+                message = await receive()
+                request_messages.append(message)
+
+                if message["type"] != "http.request":
+                    break
+
+                body_parts.append(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+
+            body, body_bytes, truncated = _body_for_log("request", b"".join(body_parts))
+            query_string = scope.get("query_string", b"").decode("latin1")
+            path = scope.get("path", "")
+
+            logger.info(
+                "http_request=%s",
+                json.dumps(
+                    {
+                        "client": scope.get("client"),
+                        "method": scope.get("method"),
+                        "path": path,
+                        "query_string": query_string,
+                        "http_version": scope.get("http_version"),
+                        "request_line": _request_line(scope),
+                        "headers": _headers_for_log(scope.get("headers", [])),
+                        "body": body,
+                        "body_bytes": body_bytes,
+                        "truncated": truncated,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+            replay_messages: Iterator[Message] = iter(request_messages)
+
+            async def replay_receive() -> Message:
+                try:
+                    return next(replay_messages)
+                except StopIteration:
+                    return await receive()
+
+            await self.app(scope, replay_receive, send)
+
+
+    class FullResponseLogger:
+        def __init__(self, app: ASGIApp):
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send):
+            if scope["type"] != "http" or _should_skip(scope):
+                await self.app(scope, receive, send)
+                return
+
+            status_code = None
+            response_headers: list[tuple[bytes, bytes]] = []
+            body_parts: list[bytes] = []
+
+            async def debug_send(message: Message):
+                nonlocal status_code, response_headers
+
+                if message["type"] == "http.response.start":
+                    status_code = message.get("status")
+                    response_headers = list(message.get("headers", []))
+                elif message["type"] == "http.response.body":
+                    body_parts.append(message.get("body", b""))
+
+                await send(message)
+
+                if (
+                    message["type"] == "http.response.body"
+                    and not message.get("more_body", False)
+                ):
+                    body, body_bytes, truncated = _body_for_log(
+                        "response", b"".join(body_parts)
+                    )
+                    logger.info(
+                        "http_response=%s",
+                        json.dumps(
+                            {
+                                "client": scope.get("client"),
+                                "method": scope.get("method"),
+                                "path": scope.get("path", ""),
+                                "query_string": scope.get(
+                                    "query_string", b""
+                                ).decode("latin1"),
+                                "http_version": scope.get("http_version"),
+                                "request_line": _request_line(scope),
+                                "status_code": status_code,
+                                "headers": _headers_for_log(response_headers),
+                                "body": body,
+                                "body_bytes": body_bytes,
+                                "truncated": truncated,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+
+            await self.app(scope, receive, debug_send)
+{{- end }}
