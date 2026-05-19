@@ -50,7 +50,9 @@ tests:
           replicaCount: 1
           requestCPU: 1
           requestMemory: "1Gi"
+          requestEphemeralStorage: "1Gi"
           requestGPU: 1
+          limitEphemeralStorage: "10Gi"
     asserts:
     - hasDocuments:
         count: 1
@@ -163,6 +165,14 @@ tests:
       equal:
         path: spec.template.spec.containers[0].imagePullPolicy
         value: Always
+    - documentIndex: 0
+      equal:
+        path: spec.template.spec.containers[0].resources.requests.ephemeral-storage
+        value: "1Gi"
+    - documentIndex: 0
+      equal:
+        path: spec.template.spec.containers[0].resources.limits.ephemeral-storage
+        value: "10Gi"
     - documentIndex: 0
       equal:
         path: spec.template.spec.containers[0].env

@@ -1318,6 +1318,10 @@
                                     "string"
                                 ]
                             },
+                            "limitEphemeralStorage": {
+                                "description": "The ephemeral storage limit for the model",
+                                "type": "string"
+                            },
                             "limitGPUCores": {
                                 "description": "Requires HAMi. The limit of GPU cores. Each unit equals to 1% device cores. https://project-hami.io/docs/userguide/NVIDIA-device/specify-device-core-usage",
                                 "type": "string"
@@ -1447,6 +1451,10 @@
                             "requestCPU": {
                                 "description": "The number of CPUs requested for the model",
                                 "type": "integer"
+                            },
+                            "requestEphemeralStorage": {
+                                "description": "The amount of ephemeral storage requested for the model",
+                                "type": "string"
                             },
                             "requestGPU": {
                                 "description": "The number of GPUs requested for the model",

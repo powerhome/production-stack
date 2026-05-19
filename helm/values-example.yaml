@@ -21,6 +21,7 @@ servingEngineSpec:
 
     requestCPU: 6
     requestMemory: "16Gi"
+    requestEphemeralStorage: "1Gi"
     requestGPU: 1
 
     pvcStorage: "10Gi"

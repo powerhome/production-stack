@@ -199,6 +199,7 @@ readinessProbe:
 {{- or
     (hasKey $modelSpec "limitMemory")
     (hasKey $modelSpec "limitCPU")
+    (hasKey $modelSpec "limitEphemeralStorage")
     (gt (int $modelSpec.requestGPU) 0)
     (hasKey $modelSpec "limitGPUMem")
     (hasKey $modelSpec "limitGPUMemPercentage")
@@ -227,6 +228,9 @@ requests:
   {{- if (hasKey $modelSpec "requestGPUCores") }}
   nvidia.com/gpucores: {{ $modelSpec.requestGPUCores | quote }}
   {{- end }}
+  {{- if (hasKey $modelSpec "requestEphemeralStorage") }}
+  ephemeral-storage: {{ $modelSpec.requestEphemeralStorage | quote }}
+  {{- end }}
 {{- if (include "chart.hasLimits" $modelSpec | fromYaml) }}
 limits:
   {{- if (hasKey $modelSpec "limitMemory") }}
@@ -247,6 +251,9 @@ limits:
   {{- end }}
   {{- if (hasKey $modelSpec "limitGPUCores") }}
   nvidia.com/gpucores: {{ $modelSpec.limitGPUCores | quote }}
+  {{- end }}
+  {{- if (hasKey $modelSpec "limitEphemeralStorage") }}
+  ephemeral-storage: {{ $modelSpec.limitEphemeralStorage | quote }}
   {{- end }}
 {{- end }}
 {{- end }}

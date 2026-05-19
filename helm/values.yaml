@@ -57,6 +57,8 @@ servingEngineSpec:
     requestCPU: 6
     # -- The amount of memory requested for the model
     requestMemory: "16Gi"
+    # -- The amount of ephemeral storage requested for the model
+    requestEphemeralStorage: "1Gi"
     # -- The number of GPUs requested for the model
     requestGPU: 1 # @schema type:[integer, number, string]
     # -- The type of GPU requested. If not specified, defaults to "nvidia.com/gpu"
@@ -71,6 +73,8 @@ servingEngineSpec:
     limitCPU: 8 # @schema type:[integer, number, string]
     # -- The memory limit for the model. If limitCPU and limitMemory are not specified, only GPU resources will have limits set equal to their requests.
     limitMemory: "32Gi"
+    # -- The ephemeral storage limit for the model
+    limitEphemeralStorage: "10Gi"
     # -- Requires HAMi. The limit of GPU memory. Each unit equals to 1M. https://project-hami.io/docs/userguide/NVIDIA-device/specify-device-memory-usage
     limitGPUMem: "3000"
     # -- Requires HAMi. The limit of GPU memory of GPU
