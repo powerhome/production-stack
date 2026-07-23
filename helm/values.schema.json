@@ -1377,6 +1377,10 @@
                                 "description": "Directly assigns a pod to a specific node (e.g., \"192.168.56.5\"). When both nodeName and nodeSelectorTerms are defined, the preference is given to nodeName.",
                                 "type": "string"
                             },
+                            "nodeSelector": {
+                                "description": "Node selector labels applied directly to the model pods.",
+                                "type": "object"
+                            },
                             "nodeSelectorTerms": {
                                 "description": "The node selector terms to match the nodes. When both affinity and nodeSelectorTerms are defined, nodeSelectorTerms will be ignored.",
                                 "type": "array"

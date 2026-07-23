@@ -529,6 +529,10 @@ spec:
       {{- if $modelSpec.nodeName }}
       nodeName: {{ $modelSpec.nodeName }}
       {{- end }}
+      {{- with $modelSpec.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if not (empty $modelSpec.affinity) }}
       affinity:
         {{- toYaml $modelSpec.affinity | nindent 8 }}
