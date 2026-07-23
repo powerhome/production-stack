@@ -37,7 +37,7 @@ spec:
       helm-release-name: {{ .Release.Name }}
     {{- include "chart.engineStandardLabels" (dict "releaseName" .Release.Name "modelName" $modelSpec.name "chartName" .Chart.Name) | nindent 6 }}
     {{- include "chart.engineLabels" . | nindent 6 }}
-  progressDeadlineSeconds: 1200
+  progressDeadlineSeconds: {{ .Values.servingEngineSpec.progressDeadlineSeconds }}
   template:
     metadata:
       {{- with $modelSpec.podAnnotations }}
