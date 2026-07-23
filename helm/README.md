@@ -141,7 +141,7 @@ This table documents all available configuration values for the Production Stack
 | `servingEngineSpec.modelSpec[].vllmConfig.v0` | integer | - | Specify to 1 to use vLLM v0, otherwise vLLM v1 |
 | `servingEngineSpec.modelSpec[].vllmConfig.enablePrefixCaching` | boolean | `false` | Enable prefix caching |
 | `servingEngineSpec.modelSpec[].vllmConfig.enableChunkedPrefill` | boolean | `false` | Enable chunked prefill |
-| `servingEngineSpec.modelSpec[].vllmConfig.maxModelLen` | integer | `4096` | The maximum model length, e.g., 16384 |
+| `servingEngineSpec.modelSpec[].vllmConfig.maxModelLen` | integer/string | `4096` | The maximum model length, e.g., 16384. Use a string to prevent large values from being serialized in scientific notation |
 | `servingEngineSpec.modelSpec[].vllmConfig.dtype` | string | `"fp16"` | The data type, e.g., "bfloat16" |
 | `servingEngineSpec.modelSpec[].vllmConfig.tensorParallelSize` | integer | `1` | The degree of tensor parallelism, e.g., 2 |
 | `servingEngineSpec.modelSpec[].vllmConfig.maxNumSeqs` | integer | `256` | Maximum number of sequences to be processed in a single iteration |

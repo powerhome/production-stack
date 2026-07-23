@@ -1568,7 +1568,10 @@
                                     },
                                     "maxModelLen": {
                                         "description": "The maximum model length",
-                                        "type": "integer"
+                                        "type": [
+                                            "integer",
+                                            "string"
+                                        ]
                                     },
                                     "maxNumSeqs": {
                                         "description": "Maximum number of sequences to be processed in a single iteration.",
