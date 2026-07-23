@@ -1734,6 +1734,11 @@
                         }
                     }
                 },
+                "progressDeadlineSeconds": {
+                    "description": "Number of seconds a serving engine deployment may make no progress before Kubernetes marks it failed",
+                    "type": "integer",
+                    "minimum": 1
+                },
                 "strategy": {
                     "description": "deployment strategy",
                     "type": "object"

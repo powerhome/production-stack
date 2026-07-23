@@ -55,6 +55,7 @@ This table documents all available configuration values for the Production Stack
 | `servingEngineSpec.servicePort` | integer | `80` | Port the service will listen on |
 | `servingEngineSpec.configs` | map | `{}` | Set other environment variables from a config map |
 | `servingEngineSpec.strategy` | map | `{}` | Deployment strategy for the serving engine pods |
+| `servingEngineSpec.progressDeadlineSeconds` | integer | `1200` | Number of seconds a serving engine deployment may make no progress before Kubernetes marks it failed |
 | `servingEngineSpec.tolerations` | list | `[]` | Tolerations configuration for the serving engine pods (when there are taints on nodes) |
 | `servingEngineSpec.runtimeClassName` | string | `"nvidia"` | RuntimeClassName configuration (set to "nvidia" if using GPU) |
 | `servingEngineSpec.schedulerName` | string | `""` | SchedulerName configuration for the serving engine pods |
