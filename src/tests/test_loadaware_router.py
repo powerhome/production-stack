@@ -580,7 +580,7 @@ def tokenize_calls(monkeypatch):
     calls = []
 
     def fake_post(url, headers=None, json=None, timeout=None):
-        calls.append({"url": url, "json": json})
+        calls.append({"url": url, "json": json, "headers": headers})
         return FakeResponse({"tokens": [1, 2, 3], "count": 3})
 
     monkeypatch.setattr(routing_logic.requests, "post", fake_post)
@@ -839,3 +839,25 @@ def test_zero_from_the_environment_is_honoured_not_treated_as_unset(monkeypatch)
 def test_garbage_in_the_environment_falls_back_to_the_default(monkeypatch):
     monkeypatch.setenv("LOADAWARE_BETA", "fast")
     assert _loadaware_beta(None) == DEFAULT_LOADAWARE_BETA
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": [{"role": "user", "content": "hello"}]},
+        {"prompt": "hello"},
+    ],
+)
+async def test_remote_tokenization_uses_backend_key(
+    monkeypatch, tokenize_calls, payload
+):
+    monkeypatch.setenv("VLLM_API_KEY", "test-backend-key")
+    router = make_router()
+
+    def unavailable_local_tokenizer(_endpoints):
+        raise RuntimeError("no local tokenizer")
+
+    monkeypatch.setattr(router, "_get_tokenizer", unavailable_local_tokenizer)
+    assert await router.tokenize_prompt(endpoints(URL_A), payload) == [1, 2, 3]
+    assert tokenize_calls[0]["headers"]["Authorization"] == "Bearer test-backend-key"
