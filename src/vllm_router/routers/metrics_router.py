@@ -121,6 +121,7 @@ async def metrics():
 
     engine_stats = get_engine_stats_scraper().get_engine_stats()
     for server, engine_stat in engine_stats.items():
+        num_requests_waiting.labels(server=server).set(engine_stat.num_queuing_requests)
         gpu_prefix_cache_hit_rate.labels(server=server).set(
             engine_stat.gpu_prefix_cache_hit_rate
         )

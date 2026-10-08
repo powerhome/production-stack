@@ -129,3 +129,39 @@ def test_repopulate_after_clear_shows_correct_values():
     output = generate_latest(REGISTRY).decode()
     assert "new-ep" in output
     assert "99.5" in output
+
+
+@pytest.mark.asyncio
+async def test_waiting_gauge_uses_engine_stats_and_drops_removed_servers(monkeypatch):
+    from types import SimpleNamespace
+    import vllm_router.routers.metrics_router as metrics_module
+    from vllm_router.stats.engine_stats import EngineStats
+
+    server = "http://queue-engine:8000"
+    engines = {server: EngineStats(num_queuing_requests=7)}
+    monkeypatch.setattr(
+        metrics_module,
+        "get_request_stats_monitor",
+        lambda: SimpleNamespace(get_request_stats=lambda _now: {}),
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "get_engine_stats_scraper",
+        lambda: SimpleNamespace(get_engine_stats=lambda: engines),
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "get_service_discovery",
+        lambda: SimpleNamespace(get_endpoint_info=lambda: []),
+    )
+
+    await metrics_module.metrics()
+    assert (
+        REGISTRY.get_sample_value("vllm:num_requests_waiting", {"server": server}) == 7
+    )
+    engines.clear()
+    await metrics_module.metrics()
+    assert (
+        REGISTRY.get_sample_value("vllm:num_requests_waiting", {"server": server})
+        is None
+    )
