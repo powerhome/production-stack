@@ -391,8 +391,12 @@ def manifest(path):
             ):
                 fail("reviewer terminal conclusions invalid")
         elif adapter == "submitted_review":
-            if not r.get("login") or not r.get("trigger"):
-                fail("submitted-review adapter requires login and trigger")
+            if not r.get("login") or bool(r.get("trigger")) == bool(
+                r.get("request_reviewer")
+            ):
+                fail("submitted-review adapter requires login and one review trigger")
+            if r.get("request_reviewer") != r["login"] and r.get("request_reviewer"):
+                fail("native review request must match reviewer login")
         else:
             fail("unknown reviewer adapter", {"id": r["id"]})
     if len([r for r in reviewers if r["adapter"] == "codex"]) > 1:
@@ -1275,7 +1279,52 @@ def trigger_reviews(args, state):
         return {"status": "already-complete", "head": head}
     issued = []
     in_flight = []
+    native_times = {}
+    native_issued = []
     for r in pending:
+        if r["adapter"] == "submitted_review" and r.get("request_reviewer"):
+            previous = recorded.get("reviewers", {}).get(r["id"]) if recorded else None
+            if previous:
+                native_times[r["id"]] = previous
+                in_flight.append(r["id"])
+                continue
+            path = f"repos/{DEST}/pulls/{pr['number']}/requested_reviewers"
+            requested = api(path)
+            login = r["request_reviewer"]
+            names = [u.get("login") for u in requested.get("users", [])]
+            requested_at = (
+                dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+            )
+            if login not in names:
+                api(path, "-f", "reviewers[]=" + login, "-X", "POST")
+                requested = api(path)
+                submitted = pages(f"repos/{DEST}/pulls/{pr['number']}/reviews")
+                completed = any(
+                    review.get("user", {}).get("type") == "Bot"
+                    and review.get("state")
+                    in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
+                    and review.get("user", {}).get("login", "").removesuffix("[bot]")
+                    == login.removesuffix("[bot]")
+                    and review.get("commit_id") == head
+                    and after(review.get("submitted_at"), requested_at)
+                    for review in submitted
+                )
+                if (
+                    login not in [u.get("login") for u in requested.get("users", [])]
+                    and not completed
+                ):
+                    fail(
+                        "native review request was not verified", {"reviewer": r["id"]}
+                    )
+                native_issued.append(r["id"])
+            native_times[r["id"]] = requested_at
+            in_flight.append(r["id"])
+            round_state = state["triggers"].setdefault(head, {})
+            round_state.setdefault("reviewers", {})[r["id"]] = requested_at
+            round_state.setdefault("at", requested_at)
+            round_state.setdefault("mode", mode)
+            write_state(state)
+            continue
         if r["adapter"] in ("codex", "check_run"):
             running = False
             if r["adapter"] == "codex":
@@ -1328,7 +1377,7 @@ def trigger_reviews(args, state):
     if not issued and not in_flight:
         fail("no review trigger evidence")
     at = min(
-        (c["created_at"] for c in issued),
+        [c["created_at"] for c in issued] + list(native_times.values()),
         default=data["ready_event"]["createdAt"] if data["ready_event"] else None,
     )
     reviewer_times = (
@@ -1343,6 +1392,9 @@ def trigger_reviews(args, state):
             if f"update-project:{head}:{mode}:{r['id']}:" in (c.get("body") or "")
         ]
         if r["id"] in in_flight:
+            if r["id"] in native_times:
+                reviewer_times[r["id"]] = native_times[r["id"]]
+                continue
             previous = (
                 recorded.get("reviewers", {}).get(r["id"], recorded.get("at"))
                 if recorded
@@ -1417,10 +1469,11 @@ def trigger_reviews(args, state):
     }
     write_state(state)
     return {
-        "status": "triggered" if issued else "already-running",
+        "status": "triggered" if issued or native_issued else "already-running",
         "head": head,
         "trigger": state["triggers"][head],
         "in_flight": in_flight,
+        "requested_reviewers": native_issued,
     }
 
 
