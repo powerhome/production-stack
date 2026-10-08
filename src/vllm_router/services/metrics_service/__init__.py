@@ -65,7 +65,7 @@ request_errors_total = Counter(
 )
 request_latency_seconds = Histogram(
     "vllm:request_latency_seconds",
-    "End-to-end request latency observed at the router",
+    "Request latency for the general JSON backend proxy",
     ["server", "model", "status"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
 )
