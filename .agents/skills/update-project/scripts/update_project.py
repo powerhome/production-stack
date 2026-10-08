@@ -814,6 +814,33 @@ def after(value, trigger):
     return a is not None and b is not None and a >= b
 
 
+def reviewer_login_matches(actual, expected):
+    actual = (actual or "").removesuffix("[bot]")
+    expected = expected.removesuffix("[bot]")
+    return actual == expected or (
+        expected == "copilot-pull-request-reviewer" and actual == "Copilot"
+    )
+
+
+def native_review_event(number, login):
+    events = pages(f"repos/{DEST}/issues/{number}/timeline")
+    matches = [
+        event
+        for event in events
+        if event.get("event") == "review_requested"
+        and event.get("requested_reviewer", {}).get("type") == "Bot"
+        and reviewer_login_matches(
+            event.get("requested_reviewer", {}).get("login"), login
+        )
+        and (
+            event.get("requested_reviewer", {}).get("login") != "Copilot"
+            or event.get("requested_reviewer", {}).get("html_url")
+            == "https://github.com/apps/copilot-pull-request-reviewer"
+        )
+    ]
+    return max(matches, key=lambda event: event.get("created_at") or "", default=None)
+
+
 def codex_result(snapshot, reviewer, trigger):
     if isinstance(trigger, dict) and any(
         not trigger.get(label) for label in ("Code Review", "Security Review")
@@ -938,8 +965,7 @@ def reviewer_result(snapshot, reviewer, trigger):
         r
         for r in snapshot["reviews"]
         if r.get("user", {}).get("type") == "Bot"
-        and r.get("user", {}).get("login", "").removesuffix("[bot]")
-        == reviewer["login"].removesuffix("[bot]")
+        and reviewer_login_matches(r.get("user", {}).get("login"), reviewer["login"])
         and r.get("commit_id") == head
         and after(r.get("submitted_at"), trigger)
     ]
@@ -1144,8 +1170,9 @@ def snapshot(state):
                 for check in data["checks"]
             )
         return any(
-            review.get("user", {}).get("login", "").removesuffix("[bot]")
-            == reviewer["login"].removesuffix("[bot]")
+            reviewer_login_matches(
+                review.get("user", {}).get("login"), reviewer["login"]
+            )
             and review.get("commit_id") == head
             and after(review.get("submitted_at"), ready_at)
             for review in data["reviews"]
@@ -1181,6 +1208,8 @@ def snapshot(state):
         for r in state["manifest"]["reviewers"]
         if r.get("login")
     }
+    if "copilot-pull-request-reviewer" in expected_logins:
+        expected_logins.add("Copilot")
     unknown = {
         r.get("user", {}).get("login", "").removesuffix("[bot]")
         for r in data["reviews"]
@@ -1292,31 +1321,57 @@ def trigger_reviews(args, state):
             requested = api(path)
             login = r["request_reviewer"]
             names = [u.get("login") for u in requested.get("users", [])]
+            event = native_review_event(pr["number"], login)
             requested_at = (
                 dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
             )
-            if login not in names:
+            current_run = any(
+                check.get("name") == "copilot-pull-request-reviewer"
+                and check.get("head_sha") == head
+                and check.get("status") != "completed"
+                for check in data["checks"]
+            )
+            recovered = event and (
+                current_run
+                or any(
+                    review.get("user", {}).get("type") == "Bot"
+                    and reviewer_login_matches(
+                        review.get("user", {}).get("login"), login
+                    )
+                    and review.get("commit_id") == head
+                    and review.get("state")
+                    in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
+                    and after(review.get("submitted_at"), event.get("created_at"))
+                    for review in data["reviews"]
+                )
+            )
+            if login not in names and not recovered:
                 api(path, "-f", "reviewers[]=" + login, "-X", "POST")
                 requested = api(path)
+                event = native_review_event(pr["number"], login)
                 submitted = pages(f"repos/{DEST}/pulls/{pr['number']}/reviews")
                 completed = any(
                     review.get("user", {}).get("type") == "Bot"
                     and review.get("state")
                     in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
-                    and review.get("user", {}).get("login", "").removesuffix("[bot]")
-                    == login.removesuffix("[bot]")
+                    and reviewer_login_matches(
+                        review.get("user", {}).get("login"), login
+                    )
                     and review.get("commit_id") == head
                     and after(review.get("submitted_at"), requested_at)
                     for review in submitted
                 )
                 if (
                     login not in [u.get("login") for u in requested.get("users", [])]
+                    and not (event and after(event.get("created_at"), requested_at))
                     and not completed
                 ):
                     fail(
                         "native review request was not verified", {"reviewer": r["id"]}
                     )
                 native_issued.append(r["id"])
+            if event and (recovered or after(event.get("created_at"), requested_at)):
+                requested_at = event["created_at"]
             native_times[r["id"]] = requested_at
             in_flight.append(r["id"])
             round_state = state["triggers"].setdefault(head, {})

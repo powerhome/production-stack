@@ -132,7 +132,9 @@ Use `check_run` with the check name and `app_slug`, or `submitted_review`
 with the bot's `login`. For a comment-triggered integration, set `trigger` to
 its documented command. For native GitHub review requests, set
 `request_reviewer` to its GitHub login, as shown for Copilot above. Native
-requests are deduplicated per published head and verified against GitHub.
+requests are deduplicated per published head and verified against GitHub's
+request timeline. Copilot may appear there as `Copilot`; verify its app identity
+rather than relying on its historical bot login or the requested-reviewers list.
 A submitted review with findings completes the pass; assess its findings before
 merging. Check-run adapters default to `terminal_conclusions: ["success"]`;
 set other conclusions only when the integration uses them for completed reviews.
