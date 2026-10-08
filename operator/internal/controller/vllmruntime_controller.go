@@ -800,6 +800,10 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 	if vllmRuntime.Spec.DeploymentConfig.SidecarConfig.Enabled {
 		containers = append(containers, r.buildSidecarContainer(vllmRuntime))
 	}
+	var runtimeClassName *string
+	if vllmRuntime.Spec.DeploymentConfig.RuntimeClass != "" {
+		runtimeClassName = &vllmRuntime.Spec.DeploymentConfig.RuntimeClass
+	}
 
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -822,7 +826,7 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 					Annotations: vllmRuntime.Spec.DeploymentConfig.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					RuntimeClassName: &vllmRuntime.Spec.DeploymentConfig.RuntimeClass,
+					RuntimeClassName: runtimeClassName,
 					Affinity:         affinity,
 					Tolerations:      vllmRuntime.Spec.DeploymentConfig.Toleration,
 					ImagePullSecrets: imagePullSecrets,
@@ -1096,20 +1100,9 @@ func (r *VLLMRuntimeReconciler) deploymentNeedsUpdate(
 	expectedPodAnnotations := expectedDep.Spec.Template.Annotations
 	actualPodAnnotations := dep.Spec.Template.Annotations
 
-	for k, v := range expectedPodAnnotations {
-		if actualPodAnnotations[k] != v {
-			log.Info(
-				"Pod annotations mismatch",
-				"key",
-				k,
-				"expected",
-				v,
-				"actual",
-				actualPodAnnotations[k],
-			)
-
-			return true
-		}
+	if !maps.Equal(expectedPodAnnotations, actualPodAnnotations) {
+		log.Info("Pod annotations mismatch", "expected", expectedPodAnnotations, "actual", actualPodAnnotations)
+		return true
 	}
 
 	// Detect drift in the /dev/shm volume (driven by shmSize). We compare the
