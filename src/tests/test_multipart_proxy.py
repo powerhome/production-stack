@@ -310,3 +310,57 @@ async def test_prefix_router_receives_multipart_prompt():
 
     assert response.status_code == 200
     assert received == {"prompt": "add a hat"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "stream"),
+    [
+        ("/v1/audio/translations", False),
+        ("/v1/audio/transcriptions", True),
+    ],
+)
+async def test_reused_client_id_tracks_concurrent_multipart_requests(endpoint, stream):
+    both_started = asyncio.Event()
+    release_backend = asyncio.Event()
+    backend_ids = []
+
+    async def handle_request(request):
+        backend_ids.append(request.headers["X-Request-Id"])
+        if len(backend_ids) == 2:
+            both_started.set()
+        await release_backend.wait()
+        return web.Response(text="done", content_type="text/plain")
+
+    async with multipart_backend(endpoint, handle_request) as backend_url:
+        async with router_client(backend_url) as client:
+            monitor = RequestStatsMonitor()
+            requests = [
+                asyncio.create_task(
+                    client.post(
+                        endpoint,
+                        headers={"X-Request-Id": "shared-client-id"},
+                        data={"model": AUDIO_MODEL, "stream": str(stream).lower()},
+                        files={"file": ("speech.wav", b"audio", "audio/wav")},
+                    )
+                )
+                for _ in range(2)
+            ]
+            try:
+                await asyncio.wait_for(both_started.wait(), timeout=5)
+                assert monitor.in_prefill_requests[backend_url] == 2
+                assert len(monitor.request_start_time) == 2
+            finally:
+                release_backend.set()
+                responses = await asyncio.gather(*requests)
+
+            assert [response.status_code for response in responses] == [200, 200]
+            assert all(
+                response.headers["X-Request-Id"] == "shared-client-id"
+                for response in responses
+            )
+            assert backend_ids == ["shared-client-id", "shared-client-id"]
+            assert monitor.finished_requests[backend_url] == 2
+            assert monitor.request_start_time == {}
+            assert monitor.in_prefill_requests[backend_url] == 0
+            assert monitor.in_decoding_requests[backend_url] == 0

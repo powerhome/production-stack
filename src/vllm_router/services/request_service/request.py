@@ -1292,6 +1292,7 @@ async def proxy_multipart_request(
     request_form: RequestFormData | None = None,
 ):
     request_id = request.headers.get("X-Request-Id", str(uuid.uuid4()))
+    stats_request_id = str(uuid.uuid4())
 
     if not model:
         return JSONResponse(
@@ -1388,7 +1389,7 @@ async def proxy_multipart_request(
             include_content_type=isinstance(form_data, bytes),
         )
 
-        request_stats_monitor.on_new_request(chosen_url, request_id, time.time())
+        request_stats_monitor.on_new_request(chosen_url, stats_request_id, time.time())
 
         try:
             backend_response = await client.post(
@@ -1399,7 +1400,7 @@ async def proxy_multipart_request(
             )
         except Exception:
             request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
+                chosen_url, stats_request_id, time.time()
             )
             raise
 
@@ -1419,14 +1420,14 @@ async def proxy_multipart_request(
                         if not first_token:
                             first_token = True
                             request_stats_monitor.on_request_response(
-                                chosen_url, request_id, time.time()
+                                chosen_url, stats_request_id, time.time()
                             )
                         if chunk:
                             yield chunk
                 finally:
                     backend_response.close()
                     request_stats_monitor.on_request_complete(
-                        chosen_url, request_id, time.time()
+                        chosen_url, stats_request_id, time.time()
                     )
 
             return StreamingResponse(
@@ -1440,7 +1441,7 @@ async def proxy_multipart_request(
 
         try:
             request_stats_monitor.on_request_response(
-                chosen_url, request_id, time.time()
+                chosen_url, stats_request_id, time.time()
             )
             if not _is_json_media_type(
                 backend_response.headers.get("content-type", "")
@@ -1472,7 +1473,7 @@ async def proxy_multipart_request(
         finally:
             backend_response.close()
             request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
+                chosen_url, stats_request_id, time.time()
             )
     except aiohttp.ClientResponseError as response_error:
         if response_error.response is not None:
