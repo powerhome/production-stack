@@ -28,23 +28,25 @@ Respect any narrower instruction in the current request.
 
 ## Workflow execution policy
 
-Keep the main-first mirror order, but disable all inherited upstream GitHub
-Actions workflows in the fork. Only explicitly allowlisted, downstream-owned
-workflows may run. Codex reviews and Portal checks are separate app integrations.
+Keep the main-first mirror order. GitHub Actions settings and run cancellation
+are outside this workflow: `prepare` must not call Actions administration APIs,
+pause repository Actions, or cancel runs. Upstream workflows may run after the
+mirror; this is an accepted window. Disable workflow files in the update branch
+before publishing it, so only explicitly allowlisted downstream workflows stay
+active. Codex reviews and Portal checks are separate app integrations.
 
-`prepare` pauses repository Actions before synchronizing `main`, disables
-upstream/unlisted workflows, and cancels their pending or running executions.
-It proves the imported workflow paths are registered and disabled before
-restoring the repository's previous Actions setting. This closes the window in
-which a new upstream workflow could execute before being disabled individually.
-Previously disabled downstream workflows remain disabled; selected-action
-restrictions are preserved. It never changes the upstream repository's settings.
-
-Policy changes require repository Actions administration permissions. Missing
-permissions block synchronization. Incomplete registration, asynchronous run
-cancellation, or failed verification leaves Actions disabled with a recovery
-journal; rerun `prepare` after resolving the reported blocker. Never restore
-Actions manually while upstream workflow execution remains possible.
+After merging upstream and resolving semantic conflicts, run
+`disable-workflows` before validation and commit. It renames every
+non-allowlisted `.yml` and `.yaml` file under `.github/workflows/` to the
+same path with `.disabled` appended, preserving file bytes. Allowlisted paths
+must be present in the trusted `powerhrg` base and absent from the imported
+upstream tree. Verified GitHub-managed dynamic Copilot or Dependabot workflow
+paths may also be listed and remain untouched. The command is
+repeatable: run it again after merging a newer upstream or `powerhrg` base if
+that merge introduces workflow files. After committing the validated merge,
+audit candidate `HEAD` before publication and confirm that no active,
+non-allowlisted `.yml` or `.yaml` workflow remains. Do not rename or otherwise
+alter allowlisted workflows.
 
 ## Preparation and semantic merge
 
@@ -63,8 +65,9 @@ Actions manually while upstream workflow execution remains possible.
    `vllm-project/production-stack:main` using `gh repo sync`, verifies parity,
    records the upstream SHA, and creates or resumes an owned
    `update-project/<upstream-sha-prefix>` branch from current `origin/powerhrg`.
-   Never force synchronization or a push. Divergence needs explicit user
-   authorization. An upstream SHA already integrated into `powerhrg` is a no-op.
+   It does not change Actions settings or cancel workflow runs. Never force
+   synchronization or a push. Divergence needs explicit user authorization. An
+   upstream SHA already integrated into `powerhrg` is a no-op.
 4. Inventory downstream commits and intended behavior against the common
    ancestor. Merge the recorded upstream SHA into the update branch with
    `git merge --no-ff --no-commit SHA`. Resolve conflicts semantically, including
@@ -75,8 +78,9 @@ Actions manually while upstream workflow execution remains possible.
    meets their intent with a better implementation. Adapt remaining downstream
    behavior to upstream interfaces. Record retained, adapted, and superseded
    behavior with evidence. Keep unrelated code intentional and unchanged.
-6. Run affected checks with finite timeouts and bounded concurrency. For chart
-   changes, validate lint, renders, schema consistency, and affected Helm tests;
+6. Run `disable-workflows`. Repeat this after any subsequent upstream or base
+   merge that introduces workflow files. Then run affected checks with finite
+   timeouts and bounded concurrency. For chart changes, validate lint, renders, schema consistency, and affected Helm tests;
    for router/operator changes, run relevant existing checks. Do not run
    deployment scripts against an active cluster as a local validation shortcut.
    Report unavailable checks honestly and require applicable remote CI.
@@ -124,8 +128,9 @@ pass even when it requests changes; CI and unresolved findings still gate merge.
 CI uses `check_run` with `app_slug`, or `status` with `creator_login`.
 An unknown completion protocol is a blocker, not permission to guess.
 List allowed downstream workflow file paths in `downstream_workflows`. An empty
-list disables all repository Actions workflows. Allowed files must exist in the
-trusted `powerhrg` base and must not be present in the imported upstream source.
+list means every `.yml` or `.yaml` workflow file is renamed with `.disabled`
+appended. Allowed files must exist in the trusted `powerhrg` base and must not
+be present in the imported upstream source.
 Known GitHub-managed dynamic paths for Copilot and Dependabot may also be
 explicitly listed when their identity is verified in the fork's live registry.
 Discover expected CI from those allowed workflows and app integrations; do not
@@ -134,6 +139,7 @@ require CI from workflows that this policy disables.
 | Subcommand | Use |
 | --- | --- |
 | `prepare --manifest FILE --inventory-confirmed` | Sync and create/resume the update branch. |
+| `disable-workflows` | Rename non-allowlisted workflow YAML files with `.disabled` appended; run after semantic merge and after later merges that add workflows. |
 | `open-pr --title TITLE --body-file FILE` | Publish the initial merge and create/resume a draft against `powerhrg`. |
 | `observe` | Return paginated feedback, evidence, gates, and a feedback digest. |
 | `observe --wait` | Observe with backoff for at most 20 minutes by default. |
