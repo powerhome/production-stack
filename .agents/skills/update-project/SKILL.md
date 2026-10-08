@@ -156,7 +156,7 @@ require CI from workflows that this policy disables.
 | `observe` | Return paginated feedback, evidence, gates, and a feedback digest. |
 | `observe --wait` | Observe with backoff for at most 20 minutes by default. |
 | `trigger-reviews` | Request missing reviews once per published-head round. |
-| `trigger-reviews --ready-early` | Mark ready early when a bot needs that trigger. |
+| `trigger-reviews --ready-early` | Mark the validated candidate ready and request final reviews. |
 | `address-thread --thread ID --outcome fixed --commit SHA --reason TEXT --defer` | Record a local fix decision without claiming it is published. |
 | `publish-fixes --feedback-digest DIGEST` | Recheck the round and push the validated fix batch once. |
 | `address-thread --thread ID --outcome fixed --commit SHA --reason TEXT` | Acknowledge a published fix, react, and resolve. |
@@ -183,11 +183,13 @@ merge decisions, validation, caveats, and where review should start. The helper
 assigns `@bcdonadio` when permitted. Attach the returned PR URL to the chat if an
 artifact-attachment tool is available.
 
-Start as draft. Request missing reviews once with `trigger-reviews`. Early ready
-status is permitted when necessary to trigger a draft-skipping bot; it does not
-relax any merge gate. A ready transition may start a new review round. Observe
-after that transition and allow running automatic passes to finish; do not issue
-duplicate explicit requests while those passes are active.
+Start as draft and request missing reviews with `trigger-reviews`. After the
+initial findings are addressed and the candidate is validated, use
+`trigger-reviews --ready-early` to mark it ready and run final reviews on the
+published head. This combines readiness-triggered and final review passes;
+merge still requires current-head reviews, CI, and applicable human approvals.
+Observe after the transition and let active passes finish without duplicate
+requests.
 
 Bind each round to the published head and its trigger, while local fixes may
 advance local HEAD. Observe all expected bots, including code and security
