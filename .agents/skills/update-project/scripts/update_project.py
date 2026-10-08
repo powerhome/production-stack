@@ -1081,7 +1081,7 @@ def snapshot(state):
     round_data = state["triggers"].get(head, {})
     ready_at = data["ready_event"]["createdAt"] if data["ready_event"] else None
 
-    def post_ready_pass(reviewer):
+    def post_ready_pass(reviewer, label=None):
         if not ready_at:
             return False
         if reviewer["adapter"] == "codex":
@@ -1097,6 +1097,8 @@ def snapshot(state):
                     continue
                 for row in body.splitlines():
                     if "Code Review**" in row or "Security Review**" in row:
+                        if label and label + "**" not in row:
+                            continue
                         stamp = re.search(r'datetime="([^"]+)"', row)
                         if stamp and after(stamp.group(1), ready_at):
                             return True
@@ -1121,6 +1123,29 @@ def snapshot(state):
         value = round_data.get("reviewers", {}).get(
             reviewer["id"], round_data.get("at")
         )
+        if reviewer["adapter"] == "codex":
+            stamps = (
+                value
+                if isinstance(value, dict)
+                else {label: value for label in ("Code Review", "Security Review")}
+            )
+            return {
+                label: max(
+                    filter(
+                        None,
+                        (
+                            stamp,
+                            (
+                                ready_at
+                                if stamp is None or post_ready_pass(reviewer, label)
+                                else None
+                            ),
+                        ),
+                    ),
+                    default=None,
+                )
+                for label, stamp in stamps.items()
+            }
         event_trigger = ready_at if value is None or post_ready_pass(reviewer) else None
         if isinstance(value, dict):
             return {
