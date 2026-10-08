@@ -373,18 +373,6 @@ def prepare(args):
     existing = state_path()
     if existing.exists():
         state = read_state()
-        if state["manifest"] != config:
-            old = state["manifest"]
-            for field, key in (("reviewers", "id"), ("ci", "name")):
-                updated = {item[key]: item for item in config[field]}
-                if any(updated.get(item[key]) != item for item in old[field]):
-                    fail(
-                        "inventory change may only add newly discovered signals",
-                        {"field": field},
-                    )
-            state["manifest"] = config
-            state["triggers"] = {}
-            write_state(state)
         if state.get("pr"):
             pr = pr_data(state)
             if pr.get("merged"):
@@ -399,6 +387,18 @@ def prepare(args):
                     fail("previous workflow archive already exists")
                 os.replace(existing, archive)
                 return prepare(args)
+        if state["manifest"] != config:
+            old = state["manifest"]
+            for field, key in (("reviewers", "id"), ("ci", "name")):
+                updated = {item[key]: item for item in config[field]}
+                if any(updated.get(item[key]) != item for item in old[field]):
+                    fail(
+                        "inventory change may only add newly discovered signals",
+                        {"field": field},
+                    )
+            state["manifest"] = config
+            state["triggers"] = {}
+            write_state(state)
         if not commit(state["upstream_sha"]):
             git("fetch", "upstream", "main", "--no-tags")
         branch_exists = (
