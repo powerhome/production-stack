@@ -213,3 +213,31 @@ def test_parse_args_log_format_accepts_json(monkeypatch: pytest.MonkeyPatch) -> 
     )
     args = parser.parse_args()
     assert args.log_format == "json"
+
+
+@pytest.mark.parametrize("file_type", ["yaml", "json"])
+def test_prefix_threshold_survives_dynamic_reload(tmp_path, file_type):
+    from types import SimpleNamespace
+    from vllm_router.dynamic_config import DynamicConfigWatcher, DynamicRouterConfig
+    from vllm_router.routers.routing_logic import cleanup_routing_logic
+
+    payload = {
+        "service_discovery": "static",
+        "routing_logic": "prefixaware",
+        "prefix_min_match_length": 64,
+        "loadaware_beta": 0.25,
+    }
+    path = tmp_path / ("router." + file_type)
+    path.write_text(
+        yaml.safe_dump(payload) if file_type == "yaml" else json.dumps(payload)
+    )
+    config = getattr(DynamicRouterConfig, "from_" + file_type)(str(path))
+    config = DynamicRouterConfig.from_args(argparse.Namespace(**vars(config)))
+    assert config.loadaware_beta == 0.25
+    watcher = object.__new__(DynamicConfigWatcher)
+    watcher.app = SimpleNamespace(state=SimpleNamespace())
+    try:
+        watcher.reconfigure_routing_logic(config)
+        assert watcher.app.state.router.prefix_min_match_length == 64
+    finally:
+        cleanup_routing_logic()

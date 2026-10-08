@@ -68,6 +68,8 @@ class DynamicRouterConfig:
 
     # Routing logic configurations
     session_key: Optional[str] = None
+    prefix_min_match_length: int = 0
+    loadaware_beta: Optional[float] = None
     priority_header: Optional[str] = "x-request-priority"
     priority_field: Optional[str] = "priority"
     priority_default: Optional[int] = 0
@@ -107,6 +109,8 @@ class DynamicRouterConfig:
             # Routing logic configurations
             routing_logic=args.routing_logic,
             session_key=args.session_key,
+            prefix_min_match_length=args.prefix_min_match_length,
+            loadaware_beta=args.loadaware_beta,
             priority_header=args.priority_header,
             priority_field=args.priority_field,
             priority_default=args.priority_default,
@@ -222,6 +226,8 @@ class DynamicConfigWatcher(metaclass=SingletonMeta):
         routing_logic = reconfigure_routing_logic(
             config.routing_logic,
             session_key=config.session_key,
+            prefix_min_match_length=config.prefix_min_match_length,
+            loadaware_beta=config.loadaware_beta,
             priority_header=config.priority_header,
             priority_field=config.priority_field,
             priority_default=config.priority_default,
