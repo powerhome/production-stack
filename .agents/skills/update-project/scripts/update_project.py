@@ -1268,15 +1268,13 @@ def trigger_reviews(args, state):
     issued = []
     in_flight = []
     for r in pending:
-        ready_at = data["ready_event"]["createdAt"] if data["ready_event"] else None
-        if ready_at:
+        if r["adapter"] in ("codex", "check_run"):
             running = False
             if r["adapter"] == "codex":
                 running = any(
                     c.get("user", {}).get("type") == "Bot"
                     and c.get("user", {}).get("login", "").removesuffix("[bot]") == BOT
                     and head in (c.get("body") or "")
-                    and after(c.get("updated_at"), ready_at)
                     and re.search(
                         r'"status"\s*:\s*"(running|in_progress|queued)"',
                         c.get("body") or "",
@@ -1289,7 +1287,6 @@ def trigger_reviews(args, state):
                     and c.get("app", {}).get("slug") == r["app_slug"]
                     and c.get("head_sha") == head
                     and c.get("status") != "completed"
-                    and after(c.get("started_at") or c.get("created_at"), ready_at)
                     for c in data["checks"]
                 )
             if running:
@@ -1343,12 +1340,26 @@ def trigger_reviews(args, state):
                 if recorded
                 else None
             )
+            event_at = (
+                data["ready_event"]["createdAt"]
+                if data["ready_event"]
+                else data["pr"].get("created_at")
+            )
+            if previous is None and r["adapter"] == "check_run":
+                starts = [
+                    check.get("started_at")
+                    for check in data["checks"]
+                    if check.get("name") == r["name"]
+                    and check.get("app", {}).get("slug") == r["app_slug"]
+                    and check.get("head_sha") == head
+                    and check.get("status") != "completed"
+                    and check.get("started_at")
+                ]
+                previous = min(starts + ([event_at] if event_at else []), default=None)
             reviewer_times[r["id"]] = (
-                codex_ready_times(
-                    data, head, data["ready_event"]["createdAt"], previous
-                )
+                codex_ready_times(data, head, event_at, previous)
                 if r["adapter"] == "codex"
-                else previous or data["ready_event"]["createdAt"]
+                else previous or event_at
             )
             continue
         if r["adapter"] == "codex" and own:
