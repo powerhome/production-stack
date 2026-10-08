@@ -200,6 +200,10 @@ tests:
           podLabels:
             cost-center: ml-infra
             gpu-type: a100
+            model: wrong-model
+            helm-release-name: wrong-release
+            app.kubernetes.io/name: wrong-app
+            app.kubernetes.io/component: wrong-component
           repository: "vllm/vllm-openai"
           tag: "latest"
           modelURL: "facebook/opt-125m"
@@ -222,6 +226,14 @@ tests:
         content:
           cost-center: ml-infra
           gpu-type: a100
+    - documentIndex: 0
+      isSubset:
+        path: spec.template.metadata.labels
+        content:
+          model: test-model
+          helm-release-name: vllm
+          app.kubernetes.io/name: test-model
+          app.kubernetes.io/component: serving-engine
     - documentIndex: 0
       isNotSubset:
         path: spec.selector.matchLabels
