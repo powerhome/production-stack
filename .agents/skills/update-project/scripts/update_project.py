@@ -1481,7 +1481,7 @@ def branch_rules():
             protection = json.loads(body)
         except ValueError:
             fail("branch protection response malformed")
-    rulesets = api(f"repos/{DEST}/rules/branches/{BASE}")
+    rulesets = pages(f"repos/{DEST}/rules/branches/{BASE}")
     if not isinstance(rulesets, list):
         fail("branch rules response malformed")
     return protection, rulesets
