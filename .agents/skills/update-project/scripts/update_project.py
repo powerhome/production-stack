@@ -418,12 +418,21 @@ def manifest(path):
     return data
 
 
-def enforce_workflow_policy(config, source_sha, base_sha):
-    policy = WorkflowPolicy(
-        run=run, git=git, fail=fail, metadata_dir=state_path().parent
-    )
-    policy.begin(config.get("downstream_workflows", []), source_sha, base_sha)
-    return policy
+def workflow_policy():
+    return WorkflowPolicy(git=git, fail=fail)
+
+
+def disable_workflows(args, state):
+    verify_repo()
+    current_branch(state)
+    return {
+        "status": "workflows-disabled",
+        **workflow_policy().disable(
+            state["upstream_sha"],
+            state["base_sha"],
+            state["manifest"].get("downstream_workflows", []),
+        ),
+    }
 
 
 def prepare(args):
@@ -495,17 +504,16 @@ def prepare(args):
         if git("symbolic-ref", "--short", "HEAD") != state["branch"]:
             clean()
             git("switch", state["branch"])
-        policy = enforce_workflow_policy(
-            config, state["upstream_sha"], state["base_sha"]
+        evidence = workflow_policy().plan(
+            state["upstream_sha"], state["base_sha"], config["downstream_workflows"]
         )
-        evidence = policy.finish(state["upstream_sha"], state["base_sha"])
         return {"status": "resumed", "state": state, "workflow_policy": evidence}
     clean()
     git("fetch", "origin", BASE, "main", "--no-tags")
     git("fetch", "upstream", "main", "--no-tags")
     source_before = git("rev-parse", "upstream/main")
     base_before = git("rev-parse", "origin/" + BASE)
-    policy = enforce_workflow_policy(config, source_before, base_before)
+    workflow_policy().plan(source_before, base_before, config["downstream_workflows"])
     # gh repo sync is intentionally called without --force.
     run(
         ["gh", "repo", "sync", DEST, "--source", SOURCE, "--branch", "main"],
@@ -526,7 +534,7 @@ def prepare(args):
     ):
         fail("local remote-tracking parity not proved")
     base = git("rev-parse", "origin/" + BASE)
-    evidence = policy.finish(src, base)
+    evidence = workflow_policy().plan(src, base, config["downstream_workflows"])
     if ancestor(src, base):
         return {
             "status": "noop",
@@ -1880,6 +1888,7 @@ def parser():
     prep = subs.add_parser("prepare")
     prep.add_argument("--manifest", required=True)
     prep.add_argument("--inventory-confirmed", action="store_true")
+    subs.add_parser("disable-workflows")
     op = subs.add_parser("open-pr")
     op.add_argument("--title", required=True)
     op.add_argument("--body-file", required=True)
@@ -1917,15 +1926,14 @@ def main():
             output = prepare(args)
         else:
             state = read_state()
-            if args.command != "observe":
-                WorkflowPolicy(
-                    run=run, git=git, fail=fail, metadata_dir=state_path().parent
-                ).audit(
+            if args.command not in ("observe", "disable-workflows"):
+                workflow_policy().audit(
                     state["upstream_sha"],
                     state["base_sha"],
                     state["manifest"].get("downstream_workflows", []),
                 )
             action = {
+                "disable-workflows": disable_workflows,
                 "open-pr": open_pr,
                 "observe": observe,
                 "trigger-reviews": trigger_reviews,
