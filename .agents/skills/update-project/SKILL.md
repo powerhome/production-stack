@@ -10,8 +10,15 @@ through a reviewed PR. Use Python 3.10+ on POSIX, `git`, and authenticated `gh`;
 installed skill is required. Invoke the bundled helper through its interpreter:
 
 ```bash
-python3 .agents/skills/update-project/scripts/update_project.py --help
+python3 -I .agents/skills/update-project/scripts/update_project.py snapshot
 ```
+
+Before merging upstream, run `snapshot` from the trusted downstream checkout.
+Use `python3 -I /absolute/runner/path SUBCOMMAND` for every subsequent command,
+using the runner path returned by `snapshot`. The runner is a hash-verified,
+read-only copy of both Python files in Git metadata, outside the candidate tree.
+Never execute candidate-tree helper files after importing upstream. Isolated
+mode prevents sibling modules and `PYTHONPATH` from overriding standard imports.
 
 Run commands from the repository root. The helper handles deterministic
 operations; the agent decides conflict resolutions, review validity, and which

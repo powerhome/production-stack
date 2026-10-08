@@ -203,6 +203,47 @@ def state_path():
     return Path(git("rev-parse", "--git-path", "update-project/state.json")).resolve()
 
 
+def runner_digest(directory):
+    hasher = hashlib.sha256()
+    for name in ("update_project.py", "workflow_policy.py"):
+        hasher.update(name.encode() + b"\0" + (directory / name).read_bytes())
+    return hasher.hexdigest()
+
+
+def snapshot_runner():
+    source = Path(__file__).resolve().parent
+    fingerprint = runner_digest(source)
+    target = state_path().parent / "runners" / fingerprint
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ("update_project.py", "workflow_policy.py"):
+        path = target / name
+        content = (source / name).read_bytes()
+        if path.exists():
+            if path.is_symlink() or path.read_bytes() != content:
+                fail("existing frozen runner differs from trusted source")
+        else:
+            path.write_bytes(content)
+            path.chmod(0o400)
+    if runner_digest(target) != fingerprint:
+        fail("frozen runner hash verification failed")
+    target.chmod(0o500)
+    return {
+        "status": "snapshot",
+        "runner": str(target / "update_project.py"),
+        "sha256": fingerprint,
+    }
+
+
+def verify_runner():
+    directory = Path(__file__).resolve().parent
+    fingerprint = runner_digest(directory)
+    expected = state_path().parent / "runners" / fingerprint
+    if directory != expected or directory.is_symlink():
+        fail("use the frozen runner returned by snapshot with python3 -I")
+    if not sys.flags.isolated:
+        fail("the frozen runner requires Python isolated mode (-I)")
+
+
 def read_state():
     path = state_path()
     if not path.exists():
@@ -1773,6 +1814,10 @@ def merge(args, state):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     subs = p.add_subparsers(dest="command", required=True)
+    subs.add_parser(
+        "snapshot",
+        help="freeze trusted helper files in Git metadata before merging upstream",
+    )
     prep = subs.add_parser("prepare")
     prep.add_argument("--manifest", required=True)
     prep.add_argument("--inventory-confirmed", action="store_true")
@@ -1803,6 +1848,10 @@ def main():
     args = parser().parse_args()
     fd = None
     try:
+        if args.command == "snapshot":
+            print(json.dumps(snapshot_runner(), sort_keys=True))
+            return 0
+        verify_runner()
         if args.command != "observe":
             fd = lock()
         if args.command == "prepare":
