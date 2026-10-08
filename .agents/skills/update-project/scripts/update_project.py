@@ -803,6 +803,14 @@ def after(value, trigger):
 
 
 def codex_result(snapshot, reviewer, trigger):
+    if isinstance(trigger, dict) and any(
+        not trigger.get(label) for label in ("Code Review", "Security Review")
+    ):
+        return {
+            "status": "pending",
+            "evidence_ids": [],
+            "reason": "current pass trigger missing",
+        }
     head = snapshot["pr"]["head"]["sha"]
     comments = [
         c
@@ -1123,6 +1131,8 @@ def snapshot(state):
         value = round_data.get("reviewers", {}).get(
             reviewer["id"], round_data.get("at")
         )
+        if value is None and ready_at is None:
+            return None
         if reviewer["adapter"] == "codex":
             stamps = (
                 value
@@ -1336,6 +1346,11 @@ def trigger_reviews(args, state):
             for c in issued
             if f"update-project:{head}:{mode}:{r['id']}:" in (c.get("body") or "")
         ]
+        if r["id"] in in_flight:
+            reviewer_times[r["id"]] = (
+                reviewer_times.get(r["id"]) or data["ready_event"]["createdAt"]
+            )
+            continue
         if r["adapter"] == "codex" and own:
             reviewer_times[r["id"]] = {
                 "Code Review": min(
