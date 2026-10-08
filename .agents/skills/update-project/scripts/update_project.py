@@ -1430,9 +1430,9 @@ def ready(args, state):
         )
     if git("rev-parse", "HEAD") != head or head != state["published_sha"]:
         fail("local, published and PR heads differ")
-    if not data["gates"]["reviewers_complete"] or not data["gates"]["threads_resolved"]:
+    if not all(data["gates"].values()):
         fail(
-            "reviewers or threads incomplete",
+            "review, CI or published-head gates incomplete",
             {
                 "gates": data["gates"],
                 "reviewer_gate": data["reviewer_gate"],
@@ -1444,8 +1444,7 @@ def ready(args, state):
         final["feedback_digest"] != args.feedback_digest
         or final["pr"]["head"]["sha"] != head
         or head != state["published_sha"]
-        or not final["gates"]["reviewers_complete"]
-        or not final["gates"]["threads_resolved"]
+        or not all(final["gates"].values())
     ):
         fail("new feedback arrived before ready transition")
     if data["pr"]["draft"]:
