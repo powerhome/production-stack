@@ -982,16 +982,53 @@ def snapshot(state):
     round_data = state["triggers"].get(head, {})
     ready_at = data["ready_event"]["createdAt"] if data["ready_event"] else None
 
+    def post_ready_pass(reviewer):
+        if not ready_at:
+            return False
+        if reviewer["adapter"] == "codex":
+            for comment in data["issue_comments"]:
+                if (
+                    comment.get("user", {}).get("login", "").removesuffix("[bot]")
+                    != BOT
+                ):
+                    continue
+                body = comment.get("body") or ""
+                marker = re.search(r"codex-security-review:v1\s*(\{[^\n]*\})", body)
+                if not marker or json.loads(marker.group(1)).get("headSha") != head:
+                    continue
+                for row in body.splitlines():
+                    if "Code Review**" in row or "Security Review**" in row:
+                        stamp = re.search(r'datetime="([^"]+)"', row)
+                        if stamp and after(stamp.group(1), ready_at):
+                            return True
+            return False
+        if reviewer["adapter"] == "check_run":
+            return any(
+                check.get("name") == reviewer["name"]
+                and check.get("app", {}).get("slug") == reviewer["app_slug"]
+                and check.get("head_sha") == head
+                and after(check.get("started_at"), ready_at)
+                for check in data["checks"]
+            )
+        return any(
+            review.get("user", {}).get("login", "").removesuffix("[bot]")
+            == reviewer["login"].removesuffix("[bot]")
+            and review.get("commit_id") == head
+            and after(review.get("submitted_at"), ready_at)
+            for review in data["reviews"]
+        )
+
     def effective_trigger(reviewer):
         value = round_data.get("reviewers", {}).get(
             reviewer["id"], round_data.get("at")
         )
+        event_trigger = ready_at if value is None or post_ready_pass(reviewer) else None
         if isinstance(value, dict):
             return {
-                name: max(filter(None, (stamp, ready_at)), default=None)
+                name: max(filter(None, (stamp, event_trigger)), default=None)
                 for name, stamp in value.items()
             }
-        return max(filter(None, (value, ready_at)), default=None)
+        return max(filter(None, (value, event_trigger)), default=None)
 
     data["reviewer_gate"] = {
         r["id"]: reviewer_result(data, r, effective_trigger(r))
