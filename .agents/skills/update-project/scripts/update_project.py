@@ -1675,15 +1675,19 @@ def merge(args, state):
                 "unexpected_review_bots": data["unexpected_review_bots"],
             },
         )
+    protection, rulesets = branch_rules()
+    queue = next((rule for rule in rulesets if rule.get("type") == "merge_queue"), None)
+    if queue and queue.get("parameters", {}).get("merge_method") != "MERGE":
+        fail("merge queue method must preserve upstream commit ancestry")
     if pr.get("mergeable") is not True or pr.get("mergeable_state") not in (
         "clean",
         "unstable",
+        *(("blocked",) if queue else ()),
     ):
         fail(
             "PR mergeability is not known clean",
             {"mergeable": pr.get("mergeable"), "state": pr.get("mergeable_state")},
         )
-    protection, rulesets = branch_rules()
     required = set(protection.get("required_status_checks", {}).get("contexts") or [])
     approval_required = requires_approval(
         protection.get("required_pull_request_reviews")
@@ -1721,7 +1725,11 @@ def merge(args, state):
             "required PR approval is not current",
             {"decision": decision.get("reviewDecision")},
         )
-    if decision.get("mergeStateStatus") not in ("CLEAN", "UNSTABLE"):
+    if decision.get("mergeStateStatus") not in (
+        "CLEAN",
+        "UNSTABLE",
+        *(("BLOCKED",) if queue else ()),
+    ):
         fail(
             "GraphQL merge state is not ready",
             {"state": decision.get("mergeStateStatus")},
@@ -1774,7 +1782,7 @@ def merge(args, state):
                 str(pr["number"]),
                 "--repo",
                 DEST,
-                "--merge",
+                *(("--merge",) if not queue else ()),
                 "--match-head-commit",
                 head,
                 "--subject",
