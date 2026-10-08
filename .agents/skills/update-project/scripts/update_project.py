@@ -1071,6 +1071,37 @@ def all_ci_result(snapshot, manifest):
     }
 
 
+def codex_ready_times(data, head, ready_at, previous):
+    labels = ("Code Review", "Security Review")
+    result = (
+        dict(previous)
+        if isinstance(previous, dict)
+        else {label: previous for label in labels}
+    )
+    if previous is None:
+        return {label: ready_at for label in labels}
+    if not ready_at:
+        return result
+    for comment in data["issue_comments"]:
+        if (
+            comment.get("user", {}).get("type") != "Bot"
+            or comment.get("user", {}).get("login", "").removesuffix("[bot]") != BOT
+        ):
+            continue
+        body = comment.get("body") or ""
+        marker = re.search(r"codex-security-review:v1\s*(\{[^\n]*\})", body)
+        if not marker or json.loads(marker.group(1)).get("headSha") != head:
+            continue
+        for label in labels:
+            row = next((line for line in body.splitlines() if label + "**" in line), "")
+            stamp = re.search(r'datetime="([^"]+)"', row)
+            if stamp and after(stamp.group(1), ready_at):
+                result[label] = max(
+                    filter(None, (result.get(label), ready_at)), default=None
+                )
+    return result
+
+
 def snapshot(state):
     pr = pr_data(state)
     number, head = pr["number"], pr["head"]["sha"]
@@ -1089,27 +1120,8 @@ def snapshot(state):
     round_data = state["triggers"].get(head, {})
     ready_at = data["ready_event"]["createdAt"] if data["ready_event"] else None
 
-    def post_ready_pass(reviewer, label=None):
+    def post_ready_pass(reviewer):
         if not ready_at:
-            return False
-        if reviewer["adapter"] == "codex":
-            for comment in data["issue_comments"]:
-                if (
-                    comment.get("user", {}).get("login", "").removesuffix("[bot]")
-                    != BOT
-                ):
-                    continue
-                body = comment.get("body") or ""
-                marker = re.search(r"codex-security-review:v1\s*(\{[^\n]*\})", body)
-                if not marker or json.loads(marker.group(1)).get("headSha") != head:
-                    continue
-                for row in body.splitlines():
-                    if "Code Review**" in row or "Security Review**" in row:
-                        if label and label + "**" not in row:
-                            continue
-                        stamp = re.search(r'datetime="([^"]+)"', row)
-                        if stamp and after(stamp.group(1), ready_at):
-                            return True
             return False
         if reviewer["adapter"] == "check_run":
             return any(
@@ -1134,28 +1146,7 @@ def snapshot(state):
         if value is None and ready_at is None:
             return None
         if reviewer["adapter"] == "codex":
-            stamps = (
-                value
-                if isinstance(value, dict)
-                else {label: value for label in ("Code Review", "Security Review")}
-            )
-            return {
-                label: max(
-                    filter(
-                        None,
-                        (
-                            stamp,
-                            (
-                                ready_at
-                                if stamp is None or post_ready_pass(reviewer, label)
-                                else None
-                            ),
-                        ),
-                    ),
-                    default=None,
-                )
-                for label, stamp in stamps.items()
-            }
+            return codex_ready_times(data, head, ready_at, value)
         event_trigger = ready_at if value is None or post_ready_pass(reviewer) else None
         if isinstance(value, dict):
             return {
@@ -1347,8 +1338,17 @@ def trigger_reviews(args, state):
             if f"update-project:{head}:{mode}:{r['id']}:" in (c.get("body") or "")
         ]
         if r["id"] in in_flight:
+            previous = (
+                recorded.get("reviewers", {}).get(r["id"], recorded.get("at"))
+                if recorded
+                else None
+            )
             reviewer_times[r["id"]] = (
-                reviewer_times.get(r["id"]) or data["ready_event"]["createdAt"]
+                codex_ready_times(
+                    data, head, data["ready_event"]["createdAt"], previous
+                )
+                if r["adapter"] == "codex"
+                else previous or data["ready_event"]["createdAt"]
             )
             continue
         if r["adapter"] == "codex" and own:
