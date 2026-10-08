@@ -1348,9 +1348,7 @@ def trigger_reviews(args, state):
                 in_flight.append(r["id"])
                 continue
             path = f"repos/{DEST}/pulls/{pr['number']}/requested_reviewers"
-            requested = api(path)
             login = r["request_reviewer"]
-            names = [u.get("login") for u in requested.get("users", [])]
             event = native_review_event(pr["number"], login)
             requested_at = (
                 dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -1375,9 +1373,9 @@ def trigger_reviews(args, state):
                     for review in data["reviews"]
                 )
             )
-            if login not in names and not recovered:
+            if not recovered:
+                previous_event = event
                 api(path, "-f", "reviewers[]=" + login, "-X", "POST")
-                requested = api(path)
                 event = native_review_event(pr["number"], login)
                 submitted = pages(f"repos/{DEST}/pulls/{pr['number']}/reviews")
                 completed = any(
@@ -1392,8 +1390,11 @@ def trigger_reviews(args, state):
                     for review in submitted
                 )
                 if (
-                    login not in [u.get("login") for u in requested.get("users", [])]
-                    and not (event and after(event.get("created_at"), requested_at))
+                    not (
+                        event
+                        and event != previous_event
+                        and after(event.get("created_at"), requested_at)
+                    )
                     and not completed
                 ):
                     fail(
