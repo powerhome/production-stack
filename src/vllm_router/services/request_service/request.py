@@ -779,12 +779,34 @@ async def route_orchestrated_disaggregated_request(
     in_router_time = time.time()
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     request_json = await request.json()
+    model = request_json.get("model")
+    if not model:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid request: missing 'model'."},
+            headers={"X-Request-Id": request_id},
+        )
+    backend_headers = _build_backend_request_headers(
+        request, request_id, include_content_type=False
+    )
+    backend_headers["Content-Type"] = "application/json"
+    if api_key := os.getenv("VLLM_API_KEY"):
+        backend_headers = {
+            key: value
+            for key, value in backend_headers.items()
+            if key.lower() != "authorization"
+        }
+        backend_headers["Authorization"] = f"Bearer {api_key}"
 
     logger.info(f"[{request_id}] Starting orchestrated disaggregated inference")
 
     # Get endpoints from service discovery
     service_discovery = get_service_discovery()
-    endpoints = service_discovery.get_endpoint_info()
+    endpoints = [
+        endpoint
+        for endpoint in service_discovery.get_endpoint_info()
+        if model in endpoint.model_names
+    ]
 
     # Use router's _find_endpoints method to get prefill and decode endpoints
     router = request.app.state.router
@@ -843,10 +865,7 @@ async def route_orchestrated_disaggregated_request(
         async with client.post(
             prefill_api_url,
             json=prefill_request_json,
-            headers={
-                "Content-Type": "application/json",
-                "X-Request-Id": request_id,
-            },
+            headers=backend_headers,
             timeout=aiohttp.ClientTimeout(total=300),
         ) as prefill_resp:
             if prefill_resp.status != 200:
@@ -889,10 +908,7 @@ async def route_orchestrated_disaggregated_request(
         decode_resp = await client.post(
             decode_api_url,
             json=decode_request,
-            headers={
-                "Content-Type": "application/json",
-                "X-Request-Id": request_id,
-            },
+            headers=backend_headers,
             timeout=aiohttp.ClientTimeout(total=600),
         )
         try:
