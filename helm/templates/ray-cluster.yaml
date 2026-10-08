@@ -272,7 +272,7 @@ spec:
           {{- if hasKey $modelSpec "pvcStorage" }}
           - name: {{ .Release.Name }}-storage
             persistentVolumeClaim:
-              claimName: "{{ .Release.Name }}-{{$modelSpec.name}}-storage-claim"
+              claimName: {{ $modelSpec.pvcExistingClaimName | default (printf "%s-%s-storage-claim" .Release.Name $modelSpec.name) | quote }}
           {{- end }}
           {{- with $modelSpec.vllmConfig }}
           {{- if hasKey $modelSpec.vllmConfig "tensorParallelSize"}}
@@ -566,7 +566,7 @@ spec:
             {{- if hasKey $modelSpec "pvcStorage" }}
             - name: {{ .Release.Name }}-storage
               persistentVolumeClaim:
-                claimName: "{{ .Release.Name }}-{{$modelSpec.name}}-storage-claim"
+                claimName: {{ $modelSpec.pvcExistingClaimName | default (printf "%s-%s-storage-claim" .Release.Name $modelSpec.name) | quote }}
             {{- end }}
             {{- with $modelSpec.vllmConfig }}
             {{- if hasKey $modelSpec.vllmConfig "tensorParallelSize"}}

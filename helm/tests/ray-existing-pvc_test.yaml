@@ -1,0 +1,41 @@
+suite: test RayCluster existing PVC
+templates:
+  - ray-cluster.yaml
+  - pvc.yaml
+tests:
+  - it: mounts an existing claim on head and worker without creating a PVC
+    release:
+      name: vllm
+    set:
+      servingEngineSpec:
+        enableEngine: true
+        modelSpec:
+          - name: test-model
+            repository: vllm/vllm-openai
+            tag: latest
+            modelURL: facebook/opt-125m
+            requestCPU: 1
+            requestMemory: 1Gi
+            requestGPU: 1
+            pvcStorage: 50Gi
+            pvcExistingClaimName: shared-model-claim
+            raySpec:
+              enabled: true
+              headNode:
+                requestCPU: 1
+                requestMemory: 1Gi
+                requestGPU: 1
+    asserts:
+      - template: ray-cluster.yaml
+        documentIndex: 0
+        equal:
+          path: spec.headGroupSpec.template.spec.volumes[2].persistentVolumeClaim.claimName
+          value: shared-model-claim
+      - template: ray-cluster.yaml
+        documentIndex: 0
+        equal:
+          path: spec.workerGroupSpecs[0].template.spec.volumes[2].persistentVolumeClaim.claimName
+          value: shared-model-claim
+      - template: pvc.yaml
+        hasDocuments:
+          count: 0
