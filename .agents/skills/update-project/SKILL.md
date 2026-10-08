@@ -19,6 +19,16 @@ validation proves the intended behavior. Invoking this skill authorizes its PR
 creation, review requests, replies, reactions, resolution, and eventual merge.
 Respect any narrower instruction in the current request.
 
+## Upstream trust
+
+This workflow explicitly trusts `vllm-project/production-stack:main` and mirrors
+it into `powerhome/production-stack:main` before reviewing the downstream merge.
+That synchronization can immediately trigger upstream-controlled workflows,
+including access to configured CI secrets and self-hosted runners. The PR gates
+protect the later `powerhrg` integration; they do not isolate the upstream mirror
+from execution. This ordering and trust assumption are intentional. If upstream
+execution is no longer trusted, change the workflow design before invoking it.
+
 ## Preparation and semantic merge
 
 1. Run `git worktree list --porcelain`, find the primary worktree, and read its
