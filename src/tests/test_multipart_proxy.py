@@ -1,5 +1,7 @@
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
+from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from vllm_router.routers.main_router import main_router
 from vllm_router.routers.routing_logic import (
     RoutingLogic,
     cleanup_routing_logic,
+    get_routing_logic,
     initialize_routing_logic,
 )
 from vllm_router.service_discovery import (
@@ -51,7 +54,12 @@ async def multipart_backend(endpoint, handler):
 
 
 @asynccontextmanager
-async def router_client(backend_url, model=AUDIO_MODEL):
+async def router_client(
+    backend_url,
+    model=AUDIO_MODEL,
+    routing_logic=RoutingLogic.ROUND_ROBIN,
+    **routing_options,
+):
     app = FastAPI()
     app.include_router(main_router)
 
@@ -77,8 +85,9 @@ async def router_client(backend_url, model=AUDIO_MODEL):
         )
 
         router = initialize_routing_logic(
-            RoutingLogic.ROUND_ROBIN,
+            routing_logic,
             max_instance_failover_reroute_attempts=0,
+            **routing_options,
         )
         stack.callback(cleanup_routing_logic)
 
@@ -227,3 +236,77 @@ async def test_image_edit_accepts_standard_multipart_request():
         "content_type": "image/png",
         "content": b"fake-image",
     }
+
+
+@pytest.mark.asyncio
+async def test_priority_router_forwards_resolved_priority_and_all_form_fields():
+    received = {}
+
+    async def edit_image(request):
+        form = await request.post()
+        received.update(
+            priority=form["priority"],
+            prompt=form["prompt"],
+            extras=form.getall("extra"),
+            image=form["image"].file.read(),
+        )
+        return web.json_response({"ok": True})
+
+    async with multipart_backend("/v1/images/edits", edit_image) as backend_url:
+        async with router_client(
+            backend_url,
+            model=IMAGE_MODEL,
+            routing_logic=RoutingLogic.PRIORITY,
+            priority_default=5,
+            priority_threshold=2,
+        ) as client:
+            response = await client.post(
+                "/v1/images/edits",
+                headers={"x-request-priority": "1"},
+                data={
+                    "model": IMAGE_MODEL,
+                    "prompt": "add a hat",
+                    "priority": "7",
+                    "extra": ["a", "b"],
+                },
+                files={"image": ("input.png", b"fake-image", "image/png")},
+            )
+
+    assert response.status_code == 200
+    assert received == {
+        "priority": "1",
+        "prompt": "add a hat",
+        "extras": ["a", "b"],
+        "image": b"fake-image",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prefix_router_receives_multipart_prompt():
+    received = {}
+
+    async def edit_image(request):
+        form = await request.post()
+        received["prompt"] = form["prompt"]
+        return web.json_response({"ok": True})
+
+    async with multipart_backend("/v1/images/edits", edit_image) as backend_url:
+        async with router_client(
+            backend_url,
+            model=IMAGE_MODEL,
+            routing_logic=RoutingLogic.PREFIXAWARE,
+            prefix_min_match_length=1,
+        ) as client:
+            router = get_routing_logic()
+            router.hashtrie.longest_prefix_match = AsyncMock(return_value=(0, set()))
+            response = await client.post(
+                "/v1/images/edits",
+                data={"model": IMAGE_MODEL, "prompt": "add a hat"},
+                files={"image": ("input.png", b"fake-image", "image/png")},
+            )
+            router.hashtrie.longest_prefix_match.assert_awaited_once_with(
+                "add a hat", {backend_url}
+            )
+
+    assert response.status_code == 200
+    assert received == {"prompt": "add a hat"}

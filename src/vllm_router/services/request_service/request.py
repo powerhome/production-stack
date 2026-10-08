@@ -25,6 +25,8 @@ from aiohttp import FormData
 from fastapi import BackgroundTasks, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests import JSONDecodeError
+from starlette.datastructures import FormData as RequestFormData
+from starlette.datastructures import UploadFile as RequestUploadFile
 
 from vllm_router.log import init_logger
 from vllm_router.routers.routing_logic import (
@@ -1237,7 +1239,14 @@ async def route_general_transcriptions(
         form_data.add_field(key, value)
 
     return await proxy_multipart_request(
-        form_data, model, endpoint, request, stream=stream
+        form_data,
+        model,
+        endpoint,
+        request,
+        stream=stream,
+        request_fields={
+            key: value for key, value in form.multi_items() if isinstance(value, str)
+        },
     )
 
 
@@ -1260,7 +1269,16 @@ async def route_multipart_request(
 
     logger.debug("Routing multipart request with model %s", model)
 
-    return await proxy_multipart_request(body, model, endpoint, request)
+    return await proxy_multipart_request(
+        body,
+        model,
+        endpoint,
+        request,
+        request_fields={
+            key: value for key, value in form.multi_items() if isinstance(value, str)
+        },
+        request_form=form,
+    )
 
 
 async def proxy_multipart_request(
@@ -1270,6 +1288,8 @@ async def proxy_multipart_request(
     request: Request,
     *,
     stream: bool = False,
+    request_fields: dict[str, str] | None = None,
+    request_form: RequestFormData | None = None,
 ):
     request_id = request.headers.get("X-Request-Id", str(uuid.uuid4()))
 
@@ -1299,6 +1319,8 @@ async def proxy_multipart_request(
     # grab the current engine and request stats
     engine_stats = engine_stats_scraper.get_engine_stats()
     request_stats = request_stats_monitor.get_request_stats(time.time())
+    request_fields = dict(request_fields or {})
+    request_fields.setdefault("prompt", "")
 
     # pick one using the router's configured logic (roundrobin, least-loaded, etc.)
     if isinstance(
@@ -1307,6 +1329,7 @@ async def proxy_multipart_request(
             KvawareRouter,
             PrefixAwareRouter,
             SessionRouter,
+            PriorityRouter,
             DisaggregatedPrefillOrchestratedRouter,
         ),
     ):
@@ -1315,7 +1338,7 @@ async def proxy_multipart_request(
             engine_stats,
             request_stats,
             request,
-            {},  # no JSON body for multipart/form-data
+            request_fields,
         )
     elif isinstance(router, DisaggregatedPrefillRouter):
         chosen_url = router.route_request(
@@ -1323,7 +1346,7 @@ async def proxy_multipart_request(
             engine_stats,
             request_stats,
             request,
-            {},  # no JSON body for multipart/form-data
+            request_fields,
         )
     else:
         chosen_url = router.route_request(
@@ -1332,6 +1355,27 @@ async def proxy_multipart_request(
             request_stats,
             request,
         )
+    if isinstance(router, PriorityRouter):
+        priority_field = router.priority_field
+        priority = str(request_fields[priority_field])
+        if request_form is None:
+            form_data.add_field(priority_field, priority)
+        else:
+            forwarded_form = aiohttp.FormData()
+            for key, value in request_form.multi_items():
+                if key == priority_field:
+                    continue
+                if isinstance(value, RequestUploadFile):
+                    forwarded_form.add_field(
+                        key,
+                        await value.read(),
+                        filename=value.filename,
+                        content_type=value.content_type,
+                    )
+                else:
+                    forwarded_form.add_field(key, value)
+            forwarded_form.add_field(priority_field, priority)
+            form_data = forwarded_form
     logger.info(
         "Proxying multi-part form request for model %s to %s", model, chosen_url
     )
