@@ -79,6 +79,11 @@ func (r *VLLMRuntimeReconciler) Reconcile(
 		log.Error(err, "Failed to get VLLMRuntime")
 		return ctrl.Result{}, err
 	}
+	if shmSize := vllmRuntime.Spec.DeploymentConfig.ShmSize; shmSize != "" {
+		if _, err := resource.ParseQuantity(shmSize); err != nil {
+			return ctrl.Result{}, fmt.Errorf("invalid shmSize %q: %w", shmSize, err)
+		}
+	}
 
 	// Check if the service already exists, if not create a new one
 	foundService := &corev1.Service{}
@@ -745,16 +750,8 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 		shmSource := corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
 		}
-		if q, err := resource.ParseQuantity(vllmRuntime.Spec.DeploymentConfig.ShmSize); err == nil {
-			shmSource.EmptyDir.SizeLimit = &q
-		} else {
-			// Don't silently mount an unbounded /dev/shm on a typo: surface the
-			// bad value so the misconfiguration is visible instead of defaulting
-			// to the node's memory limit without any indication.
-			log.Log.Error(err, "Invalid shmSize; mounting /dev/shm without a size limit",
-				"vllmRuntime", vllmRuntime.Name,
-				"shmSize", vllmRuntime.Spec.DeploymentConfig.ShmSize)
-		}
+		q := resource.MustParse(vllmRuntime.Spec.DeploymentConfig.ShmSize)
+		shmSource.EmptyDir.SizeLimit = &q
 		volumes = append(volumes, corev1.Volume{Name: "dshm", VolumeSource: shmSource})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "dshm",
