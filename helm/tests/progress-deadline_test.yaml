@@ -1,0 +1,22 @@
+suite: test model deployment progress deadline
+templates:
+  - deployment-vllm-multi.yaml
+tests:
+  - it: should render the configured progress deadline
+    set:
+      servingEngineSpec:
+        enableEngine: true
+        progressDeadlineSeconds: 12000
+        modelSpec:
+        - name: "test-model"
+          repository: "vllm/vllm-openai"
+          tag: "latest"
+          modelURL: "facebook/opt-125m"
+          replicaCount: 1
+          requestCPU: 1
+          requestMemory: "1Gi"
+          requestGPU: 1
+    asserts:
+    - equal:
+        path: spec.progressDeadlineSeconds
+        value: 12000

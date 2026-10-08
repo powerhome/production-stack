@@ -287,6 +287,9 @@ servingEngineSpec:
   # -- deployment strategy
   strategy: {}
 
+  # -- Number of seconds a serving engine deployment may make no progress before Kubernetes marks it failed
+  progressDeadlineSeconds: 1200
+
   # -- Readiness probe configuration
   startupProbe:
     # -- Number of seconds after the container has started before startup probe is initiated
