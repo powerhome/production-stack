@@ -280,8 +280,9 @@ async def process_request(
     first_token = False
     total_len = 0
     start_time = time.time()
+    stats_request_id = str(uuid.uuid4())
     request.app.state.request_stats_monitor.on_new_request(
-        backend_url, request_id, start_time
+        backend_url, stats_request_id, start_time
     )
 
     model_name = "unknown"
@@ -343,7 +344,7 @@ async def process_request(
                 if not first_token:
                     first_token = True
                     request.app.state.request_stats_monitor.on_request_response(
-                        backend_url, request_id, time.time()
+                        backend_url, stats_request_id, time.time()
                     )
                 # Collect the body only when a consumer needs it
                 if full_response is not None:
@@ -392,7 +393,7 @@ async def process_request(
         # In finally so backend-error and client-disconnect paths also release
         # the in-flight slot; on_request_complete is idempotent.
         request.app.state.request_stats_monitor.on_request_complete(
-            backend_url, request_id, time.time()
+            backend_url, stats_request_id, time.time()
         )
         request_latency_seconds.labels(
             server=backend_url, model=model_name, status=request_status
