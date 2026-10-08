@@ -1,0 +1,35 @@
+servingEngineSpec:
+  strategy:
+    type: Recreate
+  runtimeClassName: ""
+  modelSpec:
+  - name: "opt125m"
+    repository: "vllm/vllm-openai"
+    tag: "latest"
+    modelURL: "facebook/opt-125m"
+
+    replicaCount: 2
+    pdb:
+      enabled: true
+      minAvailable: 1
+      labels:
+        model: "opt125m"
+      annotations:
+        model: "opt125m"
+    requestCPU: 6
+    requestMemory: "16Gi"
+    requestGPU: 1
+
+    pvcStorage: "10Gi"
+    pvcAccessMode:
+      - ReadWriteMany
+
+    vllmConfig:
+      maxModelLen: 1024
+      extraArgs: ["--gpu-memory-utilization", "0.4"]
+
+routerSpec:
+  repository: "git-act-router"
+  tag: "ci"
+  imagePullPolicy: "IfNotPresent"
+  enableRouter: true

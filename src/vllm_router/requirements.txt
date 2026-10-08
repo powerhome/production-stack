@@ -1,7 +1,7 @@
 aiofiles==24.1.0
-aiohttp[speedups]==3.13.3
-fastapi==0.128.0
-kubernetes==32.0.0
+aiohttp[speedups]==3.14.3
+fastapi==0.135.0  # permits patched Starlette (GHSA-jp82-jpqv-5vv3)
+kubernetes==36.0.3
 numpy==1.26.4
 
 # OpenTelemetry tracing (optional)
@@ -10,7 +10,7 @@ opentelemetry-exporter-otlp==1.28.0
 opentelemetry-sdk==1.28.0
 prometheus_client==0.21.1
 psutil==7.0.0
-python-multipart==0.0.22
+python-multipart==0.0.32
 sentry-sdk[fastapi]==2.27.0
 uhashring==2.3
 uvicorn==0.34.0

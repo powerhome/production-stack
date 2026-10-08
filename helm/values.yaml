@@ -33,6 +33,10 @@ servingEngineSpec:
     annotations: {}
     # -- The annotations to add to the pods
     podAnnotations: {}
+    # -- Additional labels to add to the deployment
+    labels: {}
+    # -- Additional labels to add to the pods
+    podLabels: {}
     # -- The name of the service account to use for the deployment
     serviceAccountName: ""
     # -- The name of the priority class name for the deployment
@@ -47,6 +51,8 @@ servingEngineSpec:
     imagePullSecret: ""
     # -- The URL of the model
     modelURL: "mistralai/Mistral-7B-Instruct-v0.2"
+    # -- Hugging Face model revision (branch, tag, or commit hash) to pin the model version
+    modelRevision: ""
     # -- Chat template (Jinga2) specifying tokenizer configuration
     # chatTemplate: "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ 'Question:\n' + message['content'] + '\n\n' }}{% elif message['role'] == 'system' %}\n{{ 'System:\n' + message['content'] + '\n\n' }}{% elif message['role'] == 'assistant' %}{{ 'Answer:\n'  + message['content'] + '\n\n' }}{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ 'Answer:\n' }}{% endif %}{% endfor %}"
     # -- The number of replicas for the model
@@ -94,6 +100,11 @@ servingEngineSpec:
     pvcLabels: {}
     # -- The annotations to add to the PVC
     pvcAnnotations: {}
+    # Use an externally-managed PersistentVolumeClaim instead of one created by
+    # this chart. When set, the chart skips rendering the PVC and mounts the
+    # named claim directly (useful for GitOps setups where PVCs are managed
+    # outside the chart). Leave unset to have the chart create the PVC.
+    # pvcExistingClaimName: "my-existing-claim"
     # -- Additional volumes to add to the pod, in Kubernetes volume format
     extraVolumes: []
       # - name: tmp-volume
@@ -104,6 +115,31 @@ servingEngineSpec:
     extraVolumeMounts: []
       # - name: tmp-volume
       #   mountPath: /tmp
+    # -- Additional containers to run alongside the main vLLM container, in Kubernetes container format. Unlike the LoRA sidecar (servingEngineSpec.sidecar), these are added regardless of enableLoRA and support the full container spec (image, args, env, volumeMounts, livenessProbe, resources, etc.).
+    extraContainers: []
+      # - name: my-sidecar
+      #   image: my-registry/my-sidecar:latest
+      #   args: ["--flag", "value"]
+      #   env:
+      #     - name: MY_ENV_VAR
+      #       value: "my-value"
+      #   volumeMounts:
+      #     - name: tmp-volume
+      #       mountPath: /tmp
+      #   resources:
+      #     requests:
+      #       cpu: "100m"
+      #       memory: "128Mi"
+      #   livenessProbe:
+      #     httpGet:
+      #       path: /healthz
+      #       port: 8080
+      #     initialDelaySeconds: 5
+      #     periodSeconds: 10
+    # -- Optional container command for the main vLLM container. Replaces the default vllm serve invocation.
+    command: [] # @schema item: string
+    # -- Optional container args for the main vLLM container. Used with command to override the default vllm serve invocation.
+    args: [] # @schema item: string
     # -- The configuration for the init container to be run before the main container.
     initContainer:
     # -- The name of the init container
@@ -204,6 +240,10 @@ servingEngineSpec:
     #   - "override": model tolerations replace the global tolerations entirely for this model.
     # -- The size of the shared memory
     shmSize: "20Gi"
+    # -- The model's service annotations
+    serviceAnnotations: {}
+    # -- The model's service labels
+    serviceLabels: {}
     # -- Whether to enable LoRA
     enableLoRA: true
     # -- KEDA autoscaling configuration for this model deployment. Requires KEDA to be installed in the cluster.
@@ -275,6 +315,29 @@ servingEngineSpec:
         requestMemory: "1Gi"
         # -- GPU request for the head node
         requestGPU: 1
+        # -- Raw Kubernetes resources block for the head node container. When set, overrides the request*/limit* fields above.
+        # resources:
+        #   requests:
+        #     cpu: "2"
+        #     memory: "8Gi"
+        #     nvidia.com/gpu: "1"
+        #   limits:
+        #     cpu: "4"
+        #     memory: "16Gi"
+        #     nvidia.com/gpu: "1"
+        # -- Optional init container run before the Ray head container starts. Mirrors modelSpec.initContainer.
+        # initContainer:
+        #   name: "init"
+        #   image: "busybox:latest"
+        #   command: ["sh", "-c"]
+        #   args: ["ls"]
+        #   env: []
+        #   resources: {}
+        #   mountPvcStorage: true
+        #   extraVolumeMounts: []
+      # Worker nodes reuse the top-level modelSpec fields:
+      #   - resources come from modelSpec.requestCPU / requestMemory / requestGPU (or modelSpec.resources for a raw override)
+      #   - the optional init container comes from modelSpec.initContainer
 
   # -- Container port
   containerPort: 8000
@@ -437,6 +500,10 @@ routerSpec:
   # -- image pull policy for the router pod
   imagePullPolicy: "Always" # @schema enum:[Always,IfNotPresent,Never]
 
+  # -- The name of an existing service account to use for the router deployment.
+  # -- If set, no ServiceAccount will be created and this name will be used directly.
+  serviceAccountName: ""
+
   # -- Hugging Face token configuration
   hf_token: ""
 
@@ -446,6 +513,19 @@ routerSpec:
   # -- Container-level security context configuration. https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#securitycontext-v1-core
   containerSecurityContext: {}
 
+  # -- Additional volumes to add to the router pod, in Kubernetes volume format
+  extraVolumes: []
+    # - name: tmp-volume
+    #   emptyDir: {}
+    # - name: home-volume
+    #   emptyDir: {}
+  # -- Additional volume mounts to add to the router container, in Kubernetes volumeMount format
+  extraVolumeMounts: []
+    # - name: tmp-volume
+    #   mountPath: /tmp
+    # - name: home-volume
+    #   mountPath: /home
+
   # -- Image pull secrets for private container registries
   # Example:
   # imagePullSecrets:
@@ -454,6 +534,9 @@ routerSpec:
 
   # -- Number of replicas
   replicaCount: 1
+
+  # -- List of environment variables to set for the router
+  env: []
 
   # -- autoscaling configuration
   autoscaling:
@@ -501,8 +584,15 @@ routerSpec:
   staticBackends: ""
   staticModels: ""
 
-  # -- routing logic, supports "roundrobin", "session", "prefixaware", "kvaware" or "disaggregated_prefill"
-  routingLogic: "roundrobin" # @schema enum:[roundrobin,session,prefixaware,kvaware,disaggregated_prefill]
+  # -- routing logic, supports "roundrobin", "session", "prefixaware", "kvaware", "disaggregated_prefill" or "disaggregated_prefill_orchestrated"
+  routingLogic: "roundrobin" # @schema enum:[roundrobin,session,prefixaware,kvaware,disaggregated_prefill,disaggregated_prefill_orchestrated]
+
+  # -- Minimum prefix match length required for prefixaware routing to reuse a
+  # matched endpoint. If the longest prefix match is shorter than this value,
+  # the request falls back to QPS-based routing. Prefix matches are computed in
+  # chunks (chunk size defaults to 128 characters), so this threshold is
+  # effectively quantized to that granularity. Defaults to 0, which disables it.
+  prefixMinMatchLength: 0
 
   # -- session key if using "session" routing logic
   sessionKey: ""
@@ -854,6 +944,10 @@ loraController:
   # -- kubernetes cluster domain
   kubernetesClusterDomain: "cluster.local"
 
+  # -- The name of an existing service account to use for the lora controller deployment.
+  # -- If set, no ServiceAccount will be created and this name will be used directly.
+  serviceAccountName: ""
+
   # -- Number of lora controller replicas
   replicaCount: 1
 
@@ -1024,3 +1118,12 @@ prometheus-adapter:
   #       matches: ""
   #       as: "vllm_num_incoming_requests_total"
   #     metricsQuery: sum by(namespace, model) (vllm:num_incoming_requests_total)
+
+# -- Optional runtime AI inventory (k8s-aibom). When enabled, a
+# lightweight, unprivileged controller generates a CycloneDX 1.6 ML-BOM
+# for AI workloads in namespaces labeled aibom.k8saibom.dev/enabled=true
+# — including the vLLM deployments this chart manages. Disabled by
+# default; nothing is inventoried without both this flag and the
+# namespace opt-in label.
+k8s-aibom:
+  enabled: false

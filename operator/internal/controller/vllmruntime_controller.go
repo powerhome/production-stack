@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -332,12 +333,26 @@ func (r *VLLMRuntimeReconciler) Reconcile(
 		if *cfg.MinReplicas > cfg.MaxReplicas {
 			log.Error(nil, "Invalid autoscaling config: minReplicas must be <= maxReplicas",
 				"minReplicas", *cfg.MinReplicas, "maxReplicas", cfg.MaxReplicas)
-			return ctrl.Result{}, fmt.Errorf("minReplicas (%d) must be <= maxReplicas (%d)", *cfg.MinReplicas, cfg.MaxReplicas)
+			return ctrl.Result{}, fmt.Errorf(
+				"minReplicas (%d) must be <= maxReplicas (%d)",
+				*cfg.MinReplicas,
+				cfg.MaxReplicas,
+			)
 		}
 		if cfg.MaxReplicas < vllmRuntime.Spec.DeploymentConfig.Replicas {
-			log.Error(nil, "Invalid autoscaling config: maxReplicas must be >= deploymentConfig.replicas",
-				"maxReplicas", cfg.MaxReplicas, "replicas", vllmRuntime.Spec.DeploymentConfig.Replicas)
-			return ctrl.Result{}, fmt.Errorf("maxReplicas (%d) must be >= deploymentConfig.replicas (%d)", cfg.MaxReplicas, vllmRuntime.Spec.DeploymentConfig.Replicas)
+			log.Error(
+				nil,
+				"Invalid autoscaling config: maxReplicas must be >= deploymentConfig.replicas",
+				"maxReplicas",
+				cfg.MaxReplicas,
+				"replicas",
+				vllmRuntime.Spec.DeploymentConfig.Replicas,
+			)
+			return ctrl.Result{}, fmt.Errorf(
+				"maxReplicas (%d) must be >= deploymentConfig.replicas (%d)",
+				cfg.MaxReplicas,
+				vllmRuntime.Spec.DeploymentConfig.Replicas,
+			)
 		}
 		if err := r.reconcileScaledObject(ctx, vllmRuntime); err != nil {
 			log.Error(err, "Failed to reconcile ScaledObject")
@@ -349,7 +364,13 @@ func (r *VLLMRuntimeReconciler) Reconcile(
 		scaledObject.SetKind("ScaledObject")
 		scaledObject.SetName(vllmRuntime.Name + "-scaledobject")
 		scaledObject.SetNamespace(vllmRuntime.Namespace)
-		if err := r.Delete(ctx, scaledObject); err != nil && !errors.IsNotFound(err) {
+		// Best-effort cleanup of a stale ScaledObject when autoscaling is
+		// disabled. Tolerate IsNoMatchError so the reconcile still succeeds on
+		// clusters where KEDA is not installed (the keda.sh API group is not
+		// registered): there is nothing to delete, and requiring KEDA here
+		// would make the operator unusable on non-autoscaling clusters.
+		if err := r.Delete(ctx, scaledObject); err != nil &&
+			!errors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			log.Error(err, "Failed to delete ScaledObject")
 			return ctrl.Result{}, err
 		}
@@ -476,7 +497,7 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 	if vllmRuntime.Spec.VLLMConfig.GpuMemoryUtilization != "" {
 		args = append(
 			args,
-			"--gpu_memory_utilization",
+			"--gpu-memory-utilization",
 			vllmRuntime.Spec.VLLMConfig.GpuMemoryUtilization,
 		)
 	}
@@ -717,6 +738,30 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 		})
 	}
 
+	// Mount an emptyDir (medium=Memory) at /dev/shm when a size is requested.
+	// Tensor parallelism communicates over shared memory, and the container
+	// default /dev/shm is usually too small for it.
+	if vllmRuntime.Spec.DeploymentConfig.ShmSize != "" {
+		shmSource := corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory},
+		}
+		if q, err := resource.ParseQuantity(vllmRuntime.Spec.DeploymentConfig.ShmSize); err == nil {
+			shmSource.EmptyDir.SizeLimit = &q
+		} else {
+			// Don't silently mount an unbounded /dev/shm on a typo: surface the
+			// bad value so the misconfiguration is visible instead of defaulting
+			// to the node's memory limit without any indication.
+			log.Log.Error(err, "Invalid shmSize; mounting /dev/shm without a size limit",
+				"vllmRuntime", vllmRuntime.Name,
+				"shmSize", vllmRuntime.Spec.DeploymentConfig.ShmSize)
+		}
+		volumes = append(volumes, corev1.Volume{Name: "dshm", VolumeSource: shmSource})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "dshm",
+			MountPath: "/dev/shm",
+		})
+	}
+
 	var affinity *corev1.Affinity
 
 	if vllmRuntime.Spec.DeploymentConfig.NodeSelectorTerms != nil {
@@ -772,9 +817,11 @@ func (r *VLLMRuntimeReconciler) deploymentForVLLMRuntime(
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: vllmRuntime.Spec.DeploymentConfig.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
+					RuntimeClassName: &vllmRuntime.Spec.DeploymentConfig.RuntimeClass,
 					Affinity:         affinity,
 					Tolerations:      vllmRuntime.Spec.DeploymentConfig.Toleration,
 					ImagePullSecrets: imagePullSecrets,
@@ -1031,7 +1078,81 @@ func (r *VLLMRuntimeReconciler) deploymentNeedsUpdate(
 		return true
 	}
 
+	expectedRuntimeClass := expectedDep.Spec.Template.Spec.RuntimeClassName
+	actualRuntimeClass := dep.Spec.Template.Spec.RuntimeClassName
+
+	if !reflect.DeepEqual(expectedRuntimeClass, actualRuntimeClass) {
+		log.Info(
+			"RuntimeClass mismatch",
+			"expected",
+			expectedRuntimeClass,
+			"actual",
+			actualRuntimeClass,
+		)
+		return true
+	}
+
+	expectedPodAnnotations := expectedDep.Spec.Template.Annotations
+	actualPodAnnotations := dep.Spec.Template.Annotations
+
+	for k, v := range expectedPodAnnotations {
+		if actualPodAnnotations[k] != v {
+			log.Info(
+				"Pod annotations mismatch",
+				"key",
+				k,
+				"expected",
+				v,
+				"actual",
+				actualPodAnnotations[k],
+			)
+
+			return true
+		}
+	}
+
+	// Detect drift in the /dev/shm volume (driven by shmSize). We compare the
+	// "dshm" volume/mount specifically instead of the whole Volumes slice,
+	// whose server-side defaults (e.g. ConfigMap DefaultMode) would otherwise
+	// cause a permanent mismatch and an endless reconcile loop.
+	if !reflect.DeepEqual(
+		findVolumeByName(expectedDep.Spec.Template.Spec.Volumes, "dshm"),
+		findVolumeByName(dep.Spec.Template.Spec.Volumes, "dshm"),
+	) {
+		log.Info("shm volume mismatch")
+		return true
+	}
+
+	if len(dep.Spec.Template.Spec.Containers) > 0 &&
+		!reflect.DeepEqual(
+			findVolumeMountByName(expectedDep.Spec.Template.Spec.Containers[0].VolumeMounts, "dshm"),
+			findVolumeMountByName(dep.Spec.Template.Spec.Containers[0].VolumeMounts, "dshm"),
+		) {
+		log.Info("shm volume mount mismatch")
+		return true
+	}
+
 	return false
+}
+
+// findVolumeByName returns a pointer to the named volume, or nil if absent.
+func findVolumeByName(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+// findVolumeMountByName returns a pointer to the named volume mount, or nil.
+func findVolumeMountByName(mounts []corev1.VolumeMount, name string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == name {
+			return &mounts[i]
+		}
+	}
+	return nil
 }
 
 // updateStatus updates the status of the VLLMRuntime
@@ -1119,13 +1240,21 @@ func (r *VLLMRuntimeReconciler) reconcileScaledObject(
 					"scaleUp": map[string]interface{}{
 						"stabilizationWindowSeconds": *cfg.ScaleUpPolicy.StabilizationWindowSeconds,
 						"policies": []map[string]interface{}{
-							{"type": "Pods", "value": *cfg.ScaleUpPolicy.PodValue, "periodSeconds": *cfg.ScaleUpPolicy.PeriodSeconds},
+							{
+								"type":          "Pods",
+								"value":         *cfg.ScaleUpPolicy.PodValue,
+								"periodSeconds": *cfg.ScaleUpPolicy.PeriodSeconds,
+							},
 						},
 					},
 					"scaleDown": map[string]interface{}{
 						"stabilizationWindowSeconds": *cfg.ScaleDownPolicy.StabilizationWindowSeconds,
 						"policies": []map[string]interface{}{
-							{"type": "Pods", "value": *cfg.ScaleDownPolicy.PodValue, "periodSeconds": *cfg.ScaleDownPolicy.PeriodSeconds},
+							{
+								"type":          "Pods",
+								"value":         *cfg.ScaleDownPolicy.PodValue,
+								"periodSeconds": *cfg.ScaleDownPolicy.PeriodSeconds,
+							},
 						},
 					},
 				},
@@ -1138,8 +1267,12 @@ func (r *VLLMRuntimeReconciler) reconcileScaledObject(
 				"metadata": map[string]string{
 					"serverAddress": prometheusAddr,
 					"metricName":    "vllm_incoming_keepalive",
-					"query":         fmt.Sprintf(`sum(rate(vllm:num_incoming_requests_total{namespace="%s", model="%s"}[2m]) > bool 0)`, vllmRuntime.Namespace, servedModelName),
-					"threshold":     "1",
+					"query": fmt.Sprintf(
+						`sum(rate(vllm:num_incoming_requests_total{namespace="%s", model="%s"}[2m]) > bool 0)`,
+						vllmRuntime.Namespace,
+						servedModelName,
+					),
+					"threshold": "1",
 				},
 			},
 			{
@@ -1147,8 +1280,11 @@ func (r *VLLMRuntimeReconciler) reconcileScaledObject(
 				"metadata": map[string]string{
 					"serverAddress": prometheusAddr,
 					"metricName":    "vllm_requests_running",
-					"query":         fmt.Sprintf(`sum(vllm:num_requests_running{job="%s"})`, jobName),
-					"threshold":     fmt.Sprintf("%d", *cfg.Triggers.RequestsRunningThreshold),
+					"query": fmt.Sprintf(
+						`sum(vllm:num_requests_running{job="%s"})`,
+						jobName,
+					),
+					"threshold": fmt.Sprintf("%d", *cfg.Triggers.RequestsRunningThreshold),
 				},
 			},
 			{
@@ -1156,8 +1292,11 @@ func (r *VLLMRuntimeReconciler) reconcileScaledObject(
 				"metadata": map[string]string{
 					"serverAddress": prometheusAddr,
 					"metricName":    "vllm_generation_tokens_rate",
-					"query":         fmt.Sprintf(`sum(rate(vllm:generation_tokens_total{job="%s"}[1m]))`, jobName),
-					"threshold":     fmt.Sprintf("%d", *cfg.Triggers.GenerationTokensThreshold),
+					"query": fmt.Sprintf(
+						`sum(rate(vllm:generation_tokens_total{job="%s"}[1m]))`,
+						jobName,
+					),
+					"threshold": fmt.Sprintf("%d", *cfg.Triggers.GenerationTokensThreshold),
 				},
 			},
 			{
@@ -1165,15 +1304,23 @@ func (r *VLLMRuntimeReconciler) reconcileScaledObject(
 				"metadata": map[string]string{
 					"serverAddress": prometheusAddr,
 					"metricName":    "vllm_prompt_tokens_rate",
-					"query":         fmt.Sprintf(`sum(rate(vllm:prompt_tokens_total{job="%s"}[1m]))`, jobName),
-					"threshold":     fmt.Sprintf("%d", *cfg.Triggers.PromptTokensThreshold),
+					"query": fmt.Sprintf(
+						`sum(rate(vllm:prompt_tokens_total{job="%s"}[1m]))`,
+						jobName,
+					),
+					"threshold": fmt.Sprintf("%d", *cfg.Triggers.PromptTokensThreshold),
 				},
 			},
 		},
 	}
 
 	scaledObject.Object["spec"] = spec
-	return r.Client.Patch(ctx, scaledObject, client.Apply, client.FieldOwner("vllmruntime-controller"))
+	return r.Client.Patch(
+		ctx,
+		scaledObject,
+		client.Apply,
+		client.FieldOwner("vllmruntime-controller"),
+	)
 }
 
 // serviceForVLLMRuntime returns a VLLMRuntime Service object

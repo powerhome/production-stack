@@ -17,10 +17,13 @@ import asyncio
 import concurrent.futures
 import enum
 import math
+import os
 import random
 import threading
+import time
 import uuid
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 from fastapi import HTTPException, Request
@@ -53,13 +56,42 @@ class RoutingLogic(str, enum.Enum):
     ROUND_ROBIN = "roundrobin"
     SESSION_BASED = "session"
     KVAWARE = "kvaware"
+    LOADAWARE = "loadaware"
     PREFIXAWARE = "prefixaware"
     DISAGGREGATED_PREFILL = "disaggregated_prefill"
     DISAGGREGATED_PREFILL_ORCHESTRATED = "disaggregated_prefill_orchestrated"
+    PRIORITY = "priority"
+
+
+# The single tunable of the `loadaware` routing logic. beta = 1.0 reads as: an
+# endpoint sitting 100% above fleet-average load is docked one full cache hit's
+# worth of preference. Both score terms are dimensionless, which is what makes
+# this a defensible default rather than a number calibrated on one cluster.
+DEFAULT_LOADAWARE_BETA = 1.0
+
+
+def _loadaware_beta(override: Optional[float]) -> float:
+    """Resolve the loadaware beta: explicit value > LOADAWARE_BETA env > default.
+
+    The environment fallback lets the weight be adjusted on a running
+    deployment without changing the router's command line.
+    """
+    if override is not None:
+        return float(override)
+    raw = os.environ.get("LOADAWARE_BETA")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_LOADAWARE_BETA
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            f"Ignoring non-numeric LOADAWARE_BETA={raw!r}, "
+            f"using {DEFAULT_LOADAWARE_BETA}"
+        )
+        return DEFAULT_LOADAWARE_BETA
 
 
 class RoutingInterface(metaclass=SingletonABCMeta):
-
     def _qps_routing(
         self, endpoints: List[EndpointInfo], request_stats: Dict[str, RequestStats]
     ) -> str:
@@ -140,14 +172,31 @@ class RoutingInterface(metaclass=SingletonABCMeta):
 class RoundRobinRouter(RoutingInterface):
     # TODO (ApostaC): when available engines in the endpoints changes, the
     # algorithm may not be "perfectly" round-robin.
+
+    # Upper bound on cached endpoint-set entries to prevent unbounded memory
+    # growth when endpoints change dynamically (add / remove / update).
+    _MAX_CACHE_SIZE = 1024
+
     def __init__(self):
         if hasattr(self, "_initialized"):
             return
-        self.req_id = 0
-        self.sorted_endpoints = []
-        self.last_endpoints_id = None
-        self.last_endpoints_hash = None
+        self._next_index: dict[tuple[str, ...], int] = {}
+        self._sorted_cache: dict[frozenset[str], tuple[str, ...]] = {}
         self._initialized = True
+
+    def _endpoint_key(self, endpoints: List[EndpointInfo]) -> tuple[str, ...]:
+        """Return a stable, sorted key for the endpoint set (cached after first sort)."""
+        if not endpoints:
+            raise ValueError("RoundRobinRouter requires at least one endpoint")
+
+        urls = frozenset(e.url for e in endpoints)
+        key = self._sorted_cache.get(urls)
+        if key is None:
+            if len(self._sorted_cache) >= self._MAX_CACHE_SIZE:
+                self._sorted_cache.clear()
+            key = tuple(sorted(urls))
+            self._sorted_cache[urls] = key
+        return key
 
     def route_request(
         self,
@@ -168,16 +217,15 @@ class RoundRobinRouter(RoutingInterface):
                 indicating the request-level performance of each engine
             request (Request): The incoming request
         """
-        endpoints_id = id(endpoints)
-        if endpoints_id != self.last_endpoints_id:
-            current_hash = hash(tuple(e.url for e in endpoints))
-            if current_hash != self.last_endpoints_hash:
-                self.sorted_endpoints = sorted(endpoints, key=lambda e: e.url)
-                self.last_endpoints_hash = current_hash
-            self.last_endpoints_id = endpoints_id
-        chosen = self.sorted_endpoints[self.req_id % len(self.sorted_endpoints)]
-        self.req_id += 1
-        return chosen.url
+        endpoint_urls = self._endpoint_key(endpoints)
+        idx = self._next_index.get(endpoint_urls, 0)
+        if (
+            len(self._next_index) >= self._MAX_CACHE_SIZE
+            and endpoint_urls not in self._next_index
+        ):
+            self._next_index.clear()
+        self._next_index[endpoint_urls] = idx + 1
+        return endpoint_urls[idx % len(endpoint_urls)]
 
 
 class SessionRouter(RoutingInterface):
@@ -279,8 +327,14 @@ class KvawareRouter(RoutingInterface):
         self.instance_id_to_ip = {}
         self.session_key = session_key
         self.hash_ring = HashRing()
-        self.tokenizer = None
+        self.tokenizers = {}
         self.threshold = kv_aware_threshold
+
+    def _get_tokenizer(self, endpoints: List[EndpointInfo]):
+        model_name = endpoints[0].model_names[0]
+        if model_name not in self.tokenizers:
+            self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
+        return self.tokenizers[model_name]
 
     def start_kv_manager(self):
         """
@@ -342,11 +396,8 @@ class KvawareRouter(RoutingInterface):
         # Local-first tokenization, fall back to remote "/tokenize" API on failure
         # TODO (Yuhan): Handle chat completions
         try:
-            if self.tokenizer is None:
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    endpoints[0].model_names[0]
-                )
-            token_ids = self.tokenizer.encode(request_json.get("prompt", ""))
+            tokenizer = self._get_tokenizer(endpoints)
+            token_ids = tokenizer.encode(request_json.get("prompt", ""))
         except Exception:
             # Remote /tokenize fallback (let errors bubble up to keep behavior simple)
             remote_url = endpoints[0].url + "/tokenize"
@@ -364,16 +415,53 @@ class KvawareRouter(RoutingInterface):
         msg = LookupMsg(tokens=token_ids, event_id=event_id)
         instance_id = await self.query_manager(msg)
         matched_tokens = math.inf
+        matched_instance_id = None
         logger.debug(f"Lookup return message: {instance_id}")
-        if len(list(instance_id.layout_info.keys())) > 0:
-            matched_instance_id = list(instance_id.layout_info.keys())[
-                0
-            ]  # Get the first key
-            matched_tokens = instance_id.layout_info[matched_instance_id][1]
+        layout_info = instance_id.layout_info
+        if layout_info:
+            mapped_urls = set(self.instance_id_to_ip.values())
+            if any(endpoint.url not in mapped_urls for endpoint in endpoints) or any(
+                holder not in self.instance_id_to_ip for holder in layout_info
+            ):
+                for endpoint in endpoints:
+                    event_id = "QueryInst" + str(uuid.uuid4())
+                    query_ip = endpoint.url.split(f":{endpoint.url.split(':')[-1]}")[
+                        0
+                    ].split("//")[1]
+                    query_message = QueryInstMsg(
+                        ip=query_ip,
+                        event_id=event_id,
+                    )
+                    endpoint_instance_id = await self.query_manager(query_message)
+                    logger.debug(
+                        f"Query ip: {query_ip}, return instance id: "
+                        f"{endpoint_instance_id}"
+                    )
+                    self.instance_id_to_ip[endpoint_instance_id.instance_id] = (
+                        endpoint.url
+                    )
+                logger.info(f"Instance id to ip mapping: {self.instance_id_to_ip}")
+
+            live_urls = {endpoint.url for endpoint in endpoints}
+            url_to_instance = {
+                url: holder
+                for holder, url in self.instance_id_to_ip.items()
+                if url in live_urls
+            }
+            live_holders = [
+                holder for holder in layout_info if holder in url_to_instance.values()
+            ]
+        else:
+            live_holders = []
+
+        if live_holders:
+            matched_instance_id = max(live_holders, key=lambda key: layout_info[key][1])
+            matched_tokens = layout_info[matched_instance_id][1]
 
         if (
             instance_id is None
             or len(instance_id.layout_info) == 0
+            or matched_instance_id is None
             or matched_tokens < max(len(token_ids) - self.threshold, 0)
         ):
             session_id = self.extract_session_id(request, request_json)
@@ -387,30 +475,377 @@ class KvawareRouter(RoutingInterface):
                 # Use the hash ring to get the endpoint for the session ID
                 url = self.hash_ring.get_node(session_id)
             return url
-        else:
-            queried_instance_ids = [info for info in instance_id.layout_info]
-            if queried_instance_ids[0] not in self.instance_id_to_ip:
-                for endpoint in endpoints:
-                    event_id = "QueryInst" + str(uuid.uuid4())
-                    query_ip = endpoint.url.split(f":{endpoint.url.split(':')[-1]}")[
-                        0
-                    ].split("//")[1]
-                    query_message = QueryInstMsg(
-                        ip=query_ip,
-                        event_id=event_id,
-                    )
-                    endpoint_instance_id = await self.query_manager(query_message)
-                    logger.debug(
-                        f"Query ip: {query_ip}, return instance id: {endpoint_instance_id}"
-                    )
-                    self.instance_id_to_ip[endpoint_instance_id.instance_id] = (
-                        endpoint.url
-                    )
-                logger.info(f"Instance id to ip mapping: {self.instance_id_to_ip}")
-            logger.info(
-                f"Routing request to {queried_instance_ids[0]} found by kvaware router"
+        logger.info(f"Routing request to {matched_instance_id} found by kvaware router")
+        return self.instance_id_to_ip[matched_instance_id]
+
+
+class LoadAwareRouter(KvawareRouter):
+    """KV-cache-aware placement weighted by live engine load.
+
+    Scores every endpoint with
+
+        score(i) = matched_tokens(i) / prompt_tokens - beta * relative_load(i)
+
+        relative_load(i) = (load(i) - mean_load) / max(1, mean_load)
+
+    and routes to the argmax, so a warm-but-saturated instance can lose to a
+    cold-but-idle one. Subclasses `KvawareRouter` and overrides only the
+    selection step; when the controller reports no cache holder at all,
+    placement falls back to the upstream session-hash / QPS route, exactly
+    like `kvaware`.
+
+    See ``docs/source/use_cases/loadaware-routing.rst`` for the design
+    rationale and how to tune ``beta``.
+    """
+
+    def __init__(
+        self,
+        lmcache_controller_port: int,
+        session_key: str,
+        kv_aware_threshold: int = 2000,
+        lmcache_health_check_interval: int = 5,
+        lmcache_worker_timeout: int = 30,
+        lmcache_controller_reply_port: Optional[int] = None,
+        lmcache_controller_heartbeat_port: Optional[int] = None,
+        loadaware_beta: Optional[float] = None,
+    ):
+        super().__init__(
+            lmcache_controller_port,
+            session_key,
+            kv_aware_threshold if kv_aware_threshold is not None else 2000,
+            lmcache_health_check_interval=lmcache_health_check_interval,
+            lmcache_worker_timeout=lmcache_worker_timeout,
+            lmcache_controller_reply_port=lmcache_controller_reply_port,
+            lmcache_controller_heartbeat_port=lmcache_controller_heartbeat_port,
+        )
+        #: Weight on the load penalty, in units of "full cache hits per 100%
+        #: above fleet-average load".
+        self.beta = _loadaware_beta(loadaware_beta)
+        logger.info(f"Initialized LoadAwareRouter with beta={self.beta}")
+
+    @staticmethod
+    def live_request_stats(
+        request: Optional[Request], request_stats: Dict[str, RequestStats]
+    ) -> Dict[str, RequestStats]:
+        """Current `request_stats`, so a burst does not score against the
+        pre-burst snapshot. Falls back to `request_stats` without a monitor."""
+        state = getattr(getattr(request, "app", None), "state", None)
+        monitor = getattr(state, "request_stats_monitor", None)
+        if monitor is None:
+            return request_stats
+        return monitor.get_request_stats(time.time())
+
+    @staticmethod
+    def load_penalty(request_stats: Dict[str, RequestStats], url: str) -> int:
+        """In-flight requests on `url` (prefilling + decoding).
+
+        Uses `request_stats` because it is event-driven and fresh, unlike the
+        scrape-lagged `engine_stats`. A URL missing from it has served no
+        requests yet, which is load 0.
+        """
+        stats = request_stats.get(url) if request_stats else None
+        if stats is None:
+            return 0
+        return stats.in_prefill_requests + stats.in_decoding_requests
+
+    @classmethod
+    def relative_loads(
+        cls, request_stats: Dict[str, RequestStats], endpoints: List[EndpointInfo]
+    ) -> Dict[str, float]:
+        """Each endpoint's load as a signed fraction of the fleet mean.
+
+        `(load - mean) / max(1, mean)`: 0.0 is "average", +1.0 is "twice the
+        fleet average". Clamping the denominator at 1 keeps a near-idle fleet
+        from amplifying one in-flight request into a large relative load and
+        thrashing on noise.
+        """
+        loads = {
+            endpoint.url: cls.load_penalty(request_stats, endpoint.url)
+            for endpoint in endpoints
+        }
+        if not loads:
+            return {}
+        mean = sum(loads.values()) / len(loads)
+        return {url: (load - mean) / max(1.0, mean) for url, load in loads.items()}
+
+    def score_endpoint(
+        self, matched_tokens: int, prompt_tokens: int, relative_load: float
+    ) -> float:
+        """`cache_hit_benefit - beta * relative_load` for one endpoint.
+
+        The `min()` guard is needed because `matched_tokens` can exceed
+        `prompt_tokens` when a match is rounded up to the token database's
+        chunk boundary; without it a rounded match would outrank a genuine
+        full hit.
+        """
+        benefit = min(matched_tokens, prompt_tokens) / max(prompt_tokens, 1)
+        return benefit - self.beta * relative_load
+
+    def matched_tokens_by_url(self, layout_info: Dict) -> Dict[str, int]:
+        """Re-key the controller's answer from instance_id to engine URL.
+
+        A restarted engine registers under a fresh id while its dead id
+        lingers in the controller's `kv_pool`, so `lookup()` can name the
+        dead id as a holder whose match is phantom (the restart emptied the
+        cache). Inverting the bridge credits only the live id: dicts preserve
+        insertion order, so the last id `refresh_instance_map` wrote for a
+        URL wins.
+        """
+        url_to_instance = {url: iid for iid, url in self.instance_id_to_ip.items()}
+        matched = {}
+        for url, instance_id in url_to_instance.items():
+            info = layout_info.get(instance_id)
+            if info is not None:
+                matched[url] = info[1]
+        return matched
+
+    def select_url(
+        self,
+        endpoints: List[EndpointInfo],
+        request_stats: Dict[str, RequestStats],
+        layout_info: Dict,
+        prompt_tokens: int,
+    ) -> Optional[str]:
+        """The placement decision. Pure: no I/O, no awaits.
+
+        Requires `self.instance_id_to_ip` to be populated for every endpoint
+        (`refresh_instance_map`) since it bridges `layout_info`'s instance_id
+        keys to `request_stats`' URL keys. Ties break by lexicographic URL
+        for reproducibility; returns None if there is nothing to route to.
+        """
+        matched_by_url = self.matched_tokens_by_url(layout_info)
+        relative = self.relative_loads(request_stats, endpoints)
+        best_url = None
+        best_score = -math.inf
+        for info in sorted(endpoints, key=lambda e: e.url):
+            matched_tokens = matched_by_url.get(info.url, 0)
+            relative_load = relative.get(info.url, 0.0)
+            score = self.score_endpoint(matched_tokens, prompt_tokens, relative_load)
+            logger.debug(
+                f"loadaware score {info.url}: "
+                f"matched={matched_tokens}/{prompt_tokens} "
+                f"rel_load={relative_load:+.3f} score={score:.4f}"
             )
-            return self.instance_id_to_ip[queried_instance_ids[0]]
+            if score > best_score:
+                best_score = score
+                best_url = info.url
+        return best_url
+
+    def instance_map_is_stale(
+        self, endpoints: List[EndpointInfo], layout_info: Dict
+    ) -> bool:
+        """Does the instance_id -> URL bridge still cover what we must score?
+
+        Stale means an endpoint URL the bridge cannot score, or an
+        instance_id in `layout_info` the bridge has never seen (an engine
+        restart). Missing the latter silently degenerates placement to
+        least-loaded for the life of the router.
+        """
+        mapped_urls = set(self.instance_id_to_ip.values())
+        if any(endpoint.url not in mapped_urls for endpoint in endpoints):
+            return True
+        return any(
+            instance_id not in self.instance_id_to_ip for instance_id in layout_info
+        )
+
+    async def refresh_instance_map(
+        self, endpoints: List[EndpointInfo], layout_info: Dict
+    ) -> None:
+        """Populate instance_id -> URL for every endpoint, on demand.
+
+        Scoring needs the whole bridge, not just the one instance
+        `KvawareRouter` translates lazily. A rebuild costs one controller
+        round-trip per endpoint, so the `instance_map_is_stale` gate keeps it
+        a once-per-fleet-change cost rather than a per-request one.
+        """
+        if not self.instance_map_is_stale(endpoints, layout_info):
+            return
+
+        async def query_endpoint(endpoint: EndpointInfo) -> None:
+            event_id = "QueryInst" + str(uuid.uuid4())
+            url = endpoint.url if "//" in endpoint.url else "//" + endpoint.url
+            query_ip = urlparse(url).hostname or ""
+            query_message = QueryInstMsg(ip=query_ip, event_id=event_id)
+            endpoint_instance_id = await self.query_manager(query_message)
+            logger.debug(
+                f"Query ip: {query_ip}, return instance id: {endpoint_instance_id}"
+            )
+            self.instance_id_to_ip[endpoint_instance_id.instance_id] = endpoint.url
+
+        await asyncio.gather(*(query_endpoint(e) for e in endpoints))
+        logger.info(f"Instance id to ip mapping: {self.instance_id_to_ip}")
+
+    async def tokenize_prompt(
+        self, endpoints: List[EndpointInfo], request_json: Dict
+    ) -> List[int]:
+        """Local-first tokenization with the remote `/tokenize` fallback.
+
+        The remote fallback is a blocking HTTP call, so it runs in an
+        executor rather than on the event loop.
+
+        Chat completions (`messages`) are tokenized by the engine's
+        `/tokenize` with the model's own chat template, so the token ids match
+        what the engine prefills and caches. Reading only `prompt` would look
+        every chat request up as an empty prompt and never find a match.
+        """
+        if "messages" in request_json:
+            return await self._tokenize_chat(endpoints, request_json)
+        try:
+            tokenizer = self._get_tokenizer(endpoints)
+            return tokenizer.encode(request_json.get("prompt", ""))
+        except Exception:
+            remote_url = endpoints[0].url + "/tokenize"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "model": endpoints[0].model_names[0],
+                "prompt": request_json.get("prompt", ""),
+            }
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    remote_url, headers=headers, json=data, timeout=10
+                ),
+            )
+            return response.json()["tokens"]
+
+    @staticmethod
+    def _flatten_text_content(messages: List[Dict]) -> List[Dict]:
+        """Join text-only list content into one string.
+
+        `[{"type": "text", "text": ...}, ...]` becomes the parts joined with
+        "\n", the same way vLLM's chat_utils renders them before applying
+        the chat template. vLLM's `/tokenize` rejects list content on a
+        text-only model ("... is not a multimodal model"). Messages with any
+        non-text part are left unchanged. A malformed `messages` (not a list)
+        is returned as-is for the engine's `/tokenize` to reject.
+        """
+        if not isinstance(messages, list):
+            return messages
+        flattened = []
+        for message in messages:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list) and all(
+                isinstance(part, dict) and part.get("type") == "text"
+                for part in content
+            ):
+                message = {
+                    **message,
+                    "content": "\n".join(part.get("text", "") for part in content),
+                }
+            flattened.append(message)
+        return flattened
+
+    async def _tokenize_chat(
+        self, endpoints: List[EndpointInfo], request_json: Dict
+    ) -> List[int]:
+        """Tokenize a chat request through the engine's `/tokenize`."""
+        remote_url = endpoints[0].url + "/tokenize"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "model": endpoints[0].model_names[0],
+            "messages": self._flatten_text_content(request_json["messages"]),
+            "add_generation_prompt": request_json.get("add_generation_prompt", True),
+        }
+        for key in ("tools", "chat_template_kwargs"):
+            if key in request_json:
+                data[key] = request_json[key]
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.post(remote_url, headers=headers, json=data, timeout=10),
+        )
+        try:
+            body = response.json()
+        except ValueError as e:
+            # e.g. an HTML error page from a proxy in front of the engine
+            raise RuntimeError(
+                f"{remote_url} returned {response.status_code} (non-JSON): "
+                f"{response.text[:200]}"
+            ) from e
+        if not isinstance(body, dict) or "tokens" not in body:
+            raise RuntimeError(
+                f"{remote_url} returned {response.status_code}: {str(body)[:200]}"
+            )
+        return body["tokens"]
+
+    def fallback_url(
+        self,
+        endpoints: List[EndpointInfo],
+        request_stats: Dict[str, RequestStats],
+        request: Request,
+        request_json: Dict,
+    ) -> str:
+        """Upstream's no-cache-info route: session hash if any, else lowest
+        QPS, scored against the live load (see `live_request_stats`)."""
+        request_stats = self.live_request_stats(request, request_stats)
+        session_id = self.extract_session_id(request, request_json)
+        logger.debug(f"Fallback to using session id: {session_id}")
+        self._update_hash_ring(endpoints)
+        if session_id is None:
+            return self._qps_routing(endpoints, request_stats)
+        return self.hash_ring.get_node(session_id)
+
+    async def route_request(
+        self,
+        endpoints: List[EndpointInfo],
+        engine_stats: Dict[str, EngineStats],
+        request_stats: Dict[str, RequestStats],
+        request: Request,
+        request_json: Dict,
+    ) -> str:
+        """
+        Route the request to the engine with the best
+        `cache_hit_benefit - beta * relative_load`.
+
+        Args:
+            endpoints (List[EndpointInfo]): The list of engine URLs
+            engine_stats (Dict[str, EngineStats]): The engine stats indicating
+               the 'physical' load of each engine. Unused: it is
+               scrape-lagged, `request_stats` carries the live signal.
+            request_stats (Dict[str, RequestStats]): The request stats
+               indicating the request-level performance of each engine
+            request (Request): The incoming request
+            request_json (Dict): The request body (needed for the prefix
+               match)
+
+        Raises:
+            HTTPException: 503 if no endpoints are available.
+        """
+        if not endpoints:
+            raise HTTPException(
+                status_code=503, detail="No backend endpoints available"
+            )
+
+        try:
+            token_ids = await self.tokenize_prompt(endpoints, request_json)
+
+            event_id = "Lookup" + str(uuid.uuid4())
+            msg = LookupMsg(tokens=token_ids, event_id=event_id)
+            lookup_ret = await self.query_manager(msg)
+        except Exception as e:
+            # Tokenization (e.g. an engine `/tokenize` error while it restarts)
+            # or the controller lookup failed: route without cache information
+            # instead of failing the request with an HTTP 500.
+            logger.warning(f"loadaware lookup failed, using fallback route: {e!r}")
+            return self.fallback_url(endpoints, request_stats, request, request_json)
+        logger.debug(f"Lookup return message: {lookup_ret}")
+        layout_info = getattr(lookup_ret, "layout_info", None) or {}
+
+        if not layout_info:
+            # Nothing cached anywhere - no benefit term to weigh.
+            return self.fallback_url(endpoints, request_stats, request, request_json)
+
+        await self.refresh_instance_map(endpoints, layout_info)
+        # Score against the load as of now, not as of this request's arrival:
+        # requests routed during the awaits above are missing from the
+        # caller's snapshot.
+        request_stats = self.live_request_stats(request, request_stats)
+        url = self.select_url(endpoints, request_stats, layout_info, len(token_ids))
+        if url is None:
+            return self.fallback_url(endpoints, request_stats, request, request_json)
+        logger.info(f"Routing request to {url} found by loadaware router")
+        return url
 
 
 class PrefixAwareRouter(RoutingInterface):
@@ -421,12 +856,16 @@ class PrefixAwareRouter(RoutingInterface):
     In this class, we assume that there is no eviction of prefix cache.
     """
 
-    def __init__(self: int):
+    def __init__(
+        self,
+        prefix_min_match_length: int = 0,
+    ):
         if hasattr(self, "_initialized"):
             return
         from vllm_router.prefix.hashtrie import HashTrie
 
         self.hashtrie = HashTrie()
+        self.prefix_min_match_length = prefix_min_match_length
         self._initialized = True
 
     async def route_request(
@@ -481,15 +920,140 @@ class PrefixAwareRouter(RoutingInterface):
             prompt = request_json["prompt"]
 
         available_endpoints = set(endpoint.url for endpoint in endpoints)
-        _, matched_endpoint = await self.hashtrie.longest_prefix_match(
+        match_length, matched_endpoint = await self.hashtrie.longest_prefix_match(
             prompt, available_endpoints
         )
+
+        if match_length < self.prefix_min_match_length:
+            # Fall back to QPS routing, but still record the prompt in the
+            # trie. Without this, a router configured with
+            # prefix_min_match_length > 0 starts with an empty trie, every
+            # request matches below the threshold, nothing is ever inserted,
+            # and prefix affinity never activates.
+            selected_endpoint = self._qps_routing(endpoints, request_stats)
+            if selected_endpoint is not None:
+                await self.hashtrie.insert(prompt, selected_endpoint)
+            return selected_endpoint
 
         selected_endpoint = random.choice(list(matched_endpoint))
 
         await self.hashtrie.insert(prompt, selected_endpoint)
 
         return selected_endpoint
+
+
+class PriorityRouter(RoutingInterface):
+    """
+    Route the request to the appropriate engine URL based on a per-request
+    priority value (lower means higher priority, matching vLLM's convention).
+
+    Requests whose priority is more important than `priority_threshold` are
+    steered to the least-loaded engine (by live request-stats load); all
+    other requests round-robin across every healthy engine, including the
+    least-loaded one, so no engine is ever reserved and left idle.
+    """
+
+    def __init__(
+        self,
+        priority_header: str = "x-request-priority",
+        priority_field: str = "priority",
+        priority_default: int = 0,
+        priority_threshold: Optional[int] = None,
+    ):
+        if hasattr(self, "_initialized"):
+            return
+        self.priority_header = priority_header
+        self.priority_field = priority_field
+        self.priority_default = priority_default
+        self.priority_threshold = (
+            priority_threshold if priority_threshold is not None else priority_default
+        )
+        self._next_index: Dict[tuple, int] = {}
+        self._warned_scheduling_policy = False
+        self._initialized = True
+
+    def extract_priority(self, request: Request, request_json: Dict) -> int:
+        """
+        Resolve the request priority: header > body field > default.
+        Malformed (non-integer) values are treated as missing.
+        """
+        header_val = request.headers.get(self.priority_header)
+        if header_val is not None:
+            try:
+                return int(header_val)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Invalid priority header value {header_val!r}; "
+                    f"falling back to body field / default."
+                )
+
+        body_val = request_json.get(self.priority_field)
+        if body_val is not None:
+            try:
+                return int(body_val)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Invalid priority body field value {body_val!r}; "
+                    f"falling back to default."
+                )
+
+        return self.priority_default
+
+    def _engine_load(self, url: str, request_stats: Dict[str, RequestStats]) -> float:
+        """Live, router-local load: in-flight prefill + decode requests."""
+        stat = request_stats.get(url)
+        if stat is None:
+            return 0
+        return stat.in_prefill_requests + stat.in_decoding_requests
+
+    async def route_request(
+        self,
+        endpoints: List[EndpointInfo],
+        engine_stats: Dict[str, EngineStats],
+        request_stats: Dict[str, RequestStats],
+        request: Request,
+        request_json: Dict,
+    ) -> str:
+        """
+        Route the request based on its priority.
+
+        Args:
+            endpoints (List[EndpointInfo]): The list of engine URLs
+            engine_stats (Dict[str, EngineStats]): The engine stats indicating
+                the 'physical' load of each engine
+            request_stats (Dict[str, RequestStats]): The request stats
+                indicating the request-level performance of each engine
+            request (Request): The incoming request
+            request_json (Dict): The request body; the resolved priority is
+                injected back into this dict so it can be forwarded to the
+                engine for in-engine preemption.
+        """
+        if not endpoints:
+            raise ValueError("PriorityRouter requires at least one endpoint")
+
+        if not self._warned_scheduling_policy:
+            logger.warning(
+                "routing-logic=priority is enabled; ensure the serving "
+                "engines are started with --scheduling-policy priority for "
+                "in-engine preemption to take effect. The router cannot "
+                "verify this automatically."
+            )
+            self._warned_scheduling_policy = True
+
+        priority = self.extract_priority(request, request_json)
+        request_json[self.priority_field] = priority
+
+        endpoint_urls = tuple(sorted(endpoint.url for endpoint in endpoints))
+
+        if priority < self.priority_threshold:
+            return min(
+                endpoint_urls,
+                key=lambda url: self._engine_load(url, request_stats),
+            )
+
+        idx = self._next_index.get(endpoint_urls, 0)
+        self._next_index[endpoint_urls] = idx + 1
+        return endpoint_urls[idx % len(endpoint_urls)]
 
 
 class DisaggregatedPrefillRouter(RoutingInterface):
@@ -667,9 +1231,26 @@ def initialize_routing_logic(
             ),
         )
         router.start_kv_manager()
+    elif routing_logic == RoutingLogic.LOADAWARE:
+        logger.info("Initializing loadaware routing logic")
+        router = LoadAwareRouter(
+            lmcache_controller_port=kwargs.get("lmcache_controller_port"),
+            session_key=kwargs.get("session_key"),
+            kv_aware_threshold=kwargs.get("kv_aware_threshold"),
+            lmcache_health_check_interval=kwargs.get("lmcache_health_check_interval"),
+            lmcache_worker_timeout=kwargs.get("lmcache_worker_timeout"),
+            lmcache_controller_reply_port=kwargs.get("lmcache_controller_reply_port"),
+            lmcache_controller_heartbeat_port=kwargs.get(
+                "lmcache_controller_heartbeat_port"
+            ),
+            loadaware_beta=kwargs.get("loadaware_beta"),
+        )
+        router.start_kv_manager()
     elif routing_logic == RoutingLogic.PREFIXAWARE:
         logger.info("Initializing prefix-aware routing logic")
-        router = PrefixAwareRouter()
+        router = PrefixAwareRouter(
+            prefix_min_match_length=kwargs.get("prefix_min_match_length", 0),
+        )
     elif routing_logic == RoutingLogic.DISAGGREGATED_PREFILL:
         logger.info("Initializing disaggregated prefill routing logic")
         router = DisaggregatedPrefillRouter(
@@ -679,6 +1260,14 @@ def initialize_routing_logic(
         logger.info("Initializing disaggregated prefill orchestrated routing logic")
         return DisaggregatedPrefillOrchestratedRouter(
             kwargs.get("prefill_model_labels"), kwargs.get("decode_model_labels")
+        )
+    elif routing_logic == RoutingLogic.PRIORITY:
+        logger.info(f"Initializing priority routing logic with kwargs: {kwargs}")
+        router = PriorityRouter(
+            priority_header=kwargs.get("priority_header", "x-request-priority"),
+            priority_field=kwargs.get("priority_field", "priority"),
+            priority_default=kwargs.get("priority_default", 0),
+            priority_threshold=kwargs.get("priority_threshold"),
         )
     else:
         raise ValueError(f"Invalid routing logic {routing_logic}")
@@ -703,9 +1292,11 @@ def get_routing_logic() -> RoutingInterface:
         SessionRouter,
         RoundRobinRouter,
         KvawareRouter,
+        LoadAwareRouter,
         PrefixAwareRouter,
         DisaggregatedPrefillRouter,
         DisaggregatedPrefillOrchestratedRouter,
+        PriorityRouter,
     ):
         if cls in SingletonABCMeta._instances:
             return cls()
@@ -718,9 +1309,11 @@ def cleanup_routing_logic():
         SessionRouter,
         RoundRobinRouter,
         KvawareRouter,
+        LoadAwareRouter,
         PrefixAwareRouter,
         DisaggregatedPrefillRouter,
         DisaggregatedPrefillOrchestratedRouter,
+        PriorityRouter,
     ):
         if cls in SingletonABCMeta._instances:
             instance = cls()
