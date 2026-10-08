@@ -48,7 +48,7 @@ type DeploymentConfig struct {
 	// ShmSize, when set, mounts an emptyDir with medium=Memory at /dev/shm
 	// sized to this value (e.g. "24Gi"). Tensor parallelism uses shared
 	// memory for inter-process communication and the container default
-	// /dev/shm (typically 64Mi) is too small. Accepts any Kubernetes quantity.
+	// /dev/shm (typically 64Mi) is too small. Accepts a positive Kubernetes quantity.
 	// +optional
 	ShmSize string `json:"shmSize,omitempty"`
 

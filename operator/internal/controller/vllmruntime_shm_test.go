@@ -18,32 +18,37 @@ import (
 )
 
 func TestInvalidShmSizeDoesNotCreateResources(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{
-		productionstackv1alpha1.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme,
-	} {
-		if err := add(scheme); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runtime := &productionstackv1alpha1.VLLMRuntime{
-		ObjectMeta: metav1.ObjectMeta{Name: "invalid-shm", Namespace: "default"},
-	}
-	runtime.Spec.DeploymentConfig.ShmSize = "not-a-quantity"
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtime).Build()
-	reconciler := &VLLMRuntimeReconciler{Client: client, Scheme: scheme}
-	key := types.NamespacedName{Name: runtime.Name, Namespace: runtime.Namespace}
+	for _, size := range []string{"not-a-quantity", "0", "-1Gi"} {
+		t.Run(size, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			for _, add := range []func(*runtime.Scheme) error{
+				productionstackv1alpha1.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme,
+			} {
+				if err := add(scheme); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime := &productionstackv1alpha1.VLLMRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "invalid-shm", Namespace: "default"},
+			}
+			runtime.Spec.DeploymentConfig.ShmSize = size
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtime).Build()
+			reconciler := &VLLMRuntimeReconciler{Client: client, Scheme: scheme}
+			key := types.NamespacedName{Name: runtime.Name, Namespace: runtime.Namespace}
 
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	if err == nil || !strings.Contains(err.Error(), "shmSize") {
-		t.Fatalf("Reconcile() error = %v, want invalid shmSize error", err)
-	}
-	if err := client.Get(ctx, key, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Errorf("Service lookup error = %v, want NotFound", err)
-	}
-	if err := client.Get(ctx, key, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
-		t.Errorf("Deployment lookup error = %v, want NotFound", err)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			if err == nil || !strings.Contains(err.Error(), "shmSize") {
+				t.Fatalf("Reconcile() error = %v, want invalid shmSize error", err)
+			}
+			if err := client.Get(ctx, key, &corev1.Service{}); !apierrors.IsNotFound(err) {
+				t.Errorf("Service lookup error = %v, want NotFound", err)
+			}
+			if err := client.Get(ctx, key, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+				t.Errorf("Deployment lookup error = %v, want NotFound", err)
+			}
+
+		})
 	}
 }
 

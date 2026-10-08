@@ -80,8 +80,12 @@ func (r *VLLMRuntimeReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 	if shmSize := vllmRuntime.Spec.DeploymentConfig.ShmSize; shmSize != "" {
-		if _, err := resource.ParseQuantity(shmSize); err != nil {
+		quantity, err := resource.ParseQuantity(shmSize)
+		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("invalid shmSize %q: %w", shmSize, err)
+		}
+		if quantity.Sign() <= 0 {
+			return ctrl.Result{}, fmt.Errorf("invalid shmSize %q: must be positive", shmSize)
 		}
 	}
 
