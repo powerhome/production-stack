@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
 import requests
@@ -32,6 +32,16 @@ from vllm_router.log import init_logger
 logger = init_logger(__name__)
 
 _global_service_discovery: "Optional[ServiceDiscovery]" = None
+_MODEL_INFO_KNOWN_FIELDS = frozenset(
+    {
+        "id",
+        "object",
+        "created",
+        "owned_by",
+        "root",
+        "parent",
+    }
+)
 
 
 class ServiceDiscoveryType(enum.Enum):
@@ -51,6 +61,7 @@ class ModelInfo:
     root: Optional[str] = None
     parent: Optional[str] = None
     is_adapter: bool = False
+    extra_fields: Dict[str, Any] = None
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ModelInfo":
@@ -63,51 +74,38 @@ class ModelInfo:
             root=data.get("root", None),
             parent=data.get("parent", None),
             is_adapter=data.get("parent") is not None,
+            extra_fields={
+                k: v for k, v in data.items() if k not in _MODEL_INFO_KNOWN_FIELDS
+            },
         )
 
     def to_dict(self) -> Dict:
         """Convert the ModelInfo instance to a dictionary."""
-        return {
+        data = {
             "id": self.id,
             "object": self.object,
             "created": self.created,
             "owned_by": self.owned_by,
             "root": self.root,
             "parent": self.parent,
-            "is_adapter": self.is_adapter,
         }
+        if self.extra_fields:
+            data.update(self.extra_fields)
+        return data
 
 
 @dataclass
 class EndpointInfo:
-    # Endpoint's url
     url: str
-
-    # Model names
     model_names: List[str]
-
-    # Endpoint Id
     Id: str
-
-    # Added timestamp
     added_timestamp: float
-
-    # Model label
     model_label: str
-
-    # Endpoint's sleep status
     sleep: bool
-
-    # Pod name
+    healthy: bool = True
     pod_name: Optional[str] = None
-
-    # Service name
     service_name: Optional[str] = None
-
-    # Namespace
     namespace: Optional[str] = None
-
-    # Model information including relationships
     model_info: Dict[str, ModelInfo] = None
 
     def __str__(self):
@@ -236,7 +234,7 @@ class StaticServiceDiscovery(ServiceDiscovery):
         decode_model_labels: List[str] | None = None,
     ):
         self.app = app
-        assert len(urls) == len(models), "URLs and models should have the same length"
+        self._validate_index_aligned_lists(urls, models, model_labels, model_types)
         self.urls = urls
         self.models = models
         self.aliases = aliases
@@ -253,24 +251,63 @@ class StaticServiceDiscovery(ServiceDiscovery):
         self.prefill_model_labels = prefill_model_labels
         self.decode_model_labels = decode_model_labels
 
-    def get_unhealthy_endpoint_hashes(self) -> list[str]:
-        unhealthy_endpoints = []
-        try:
-            for url, model, model_type in zip(
-                self.urls, self.models, self.model_types, strict=True
-            ):
-                if utils.is_model_healthy(
-                    url, model, model_type, self.health_check_timeout
-                ):
-                    logger.debug(f"{model} at {url} is healthy")
-                else:
-                    logger.warning(f"{model} at {url} not healthy!")
-                    unhealthy_endpoints.append(self.get_model_endpoint_hash(url, model))
-        except ValueError:
-            logger.error(
-                "To perform health check, each model has to define a static_model_type and at least one static_backend. "
-                "Skipping health checks for now."
+    @staticmethod
+    def _validate_index_aligned_lists(
+        urls: List[str],
+        models: List[str] | None,
+        model_labels: List[str] | None,
+        model_types: List[str] | None,
+    ) -> None:
+        if models is None:
+            raise ValueError("models must be provided")
+        if len(urls) != len(models):
+            raise ValueError(
+                f"urls ({len(urls)}) and models ({len(models)}) "
+                "must have the same length"
             )
+
+        for list_name, values in (
+            ("model_labels", model_labels),
+            ("model_types", model_types),
+        ):
+            if values is not None and len(urls) != len(values):
+                raise ValueError(
+                    f"urls ({len(urls)}) and {list_name} ({len(values)}) "
+                    "must have the same length"
+                )
+
+    def get_unhealthy_endpoint_hashes(self) -> list[str]:
+        try:
+            self._validate_index_aligned_lists(
+                self.urls, self.models, self.model_labels, self.model_types
+            )
+        except ValueError as error:
+            logger.error(
+                f"Skipping health checks and marking all endpoints unhealthy: {error}"
+            )
+            # Quarantine every URL/model pair that get_endpoint_info could expose.
+            return [
+                self.get_model_endpoint_hash(url, model)
+                for url, model in zip(self.urls, self.models)
+            ]
+
+        if self.model_types is None:
+            logger.error(
+                "To perform health checks, each model must define a static model type."
+            )
+            return []
+
+        unhealthy_endpoints = []
+        for url, model, model_type in zip(
+            self.urls, self.models, self.model_types, strict=True
+        ):
+            if utils.is_model_healthy(
+                url, model, model_type, self.health_check_timeout
+            ):
+                logger.debug(f"{model} at {url} is healthy")
+            else:
+                logger.warning(f"{model} at {url} not healthy!")
+                unhealthy_endpoints.append(self.get_model_endpoint_hash(url, model))
         return unhealthy_endpoints
 
     async def check_model_health(self):
@@ -808,6 +845,20 @@ class K8sPodIPServiceDiscovery(ServiceDiscovery):
 
         elif event == "MODIFIED":
             if engine_ip is None:
+                # An empty IP is ambiguous: a Pending pod has not been
+                # assigned an IP yet (skip it), but an Evicted pod has had
+                # its podIP cleared by the kubelet. In the latter case the
+                # endpoint is already registered and must be removed, or it
+                # lingers as a stale ("ghost") backend that still receives
+                # traffic until the router process restarts. Complete the
+                # symmetric removal path here.
+                if engine_name in self.available_engines:
+                    logger.warning(
+                        f"Serving engine {engine_name} has an empty IP "
+                        f"(likely evicted, podIP cleared by kubelet); "
+                        f"removing it to avoid a stale (ghost) endpoint"
+                    )
+                    self._delete_engine(engine_name)
                 return
 
             if is_pod_ready and model_names:
@@ -1017,10 +1068,16 @@ class K8sServiceNameServiceDiscovery(ServiceDiscovery):
             enable_sleep_mode = False
             for container in pods.items[0].spec.containers:
                 if container.name == "vllm":
-                    for arg in container.command:
-                        if arg == "--enable-sleep-mode":
-                            enable_sleep_mode = True
-                            break
+                    # container.command is None whenever the pod does not
+                    # override the image entrypoint, which is an ordinary
+                    # deployment rather than a signal that sleep mode is off.
+                    # Same guard as K8sPodIPServiceDiscovery above.
+                    if (
+                        not container.command
+                        or "--enable-sleep-mode" in container.command
+                    ):
+                        enable_sleep_mode = True
+                    break
             return enable_sleep_mode
         except client.rest.ApiException as e:
             logger.error(

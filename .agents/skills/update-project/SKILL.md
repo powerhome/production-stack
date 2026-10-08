@@ -24,7 +24,12 @@ Run commands from the repository root. The helper handles deterministic
 operations; the agent decides conflict resolutions, review validity, and which
 validation proves the intended behavior. Invoking this skill authorizes its PR
 creation, review requests, replies, reactions, resolution, and eventual merge.
-Respect any narrower instruction in the current request.
+Respect narrower instructions in the current request. Carry the workflow forward
+using the available GitHub APIs and repository evidence. Resolve routine tooling
+and integration gaps within the authorized task instead of asking the user to
+solve them. If the helper lacks a needed mechanism, make the smallest scoped
+repair, validate it, and take a fresh trusted snapshot before continuing.
+Preserve required reviews, current-head checks, and explicit human approvals.
 
 ## Workflow execution policy
 
@@ -55,11 +60,11 @@ alter allowlisted workflows.
    Never copy, change, stage, or commit `AGENTS.local.md`. Preserve existing work;
    use a clean worktree for the update. Refresh a clean default branch with
    `git pull --ff-only` before modifying it.
-2. Discover expected automated reviewers, their documented triggers/completion
-   protocols, and applicable CI from repository configuration, current/recent
-   PR activity, workflow path filters, and branch rules. Write a JSON manifest
-   outside tracked files. Explicitly list the full inventory; do not silently
-   exclude an inactive, unknown, or draft-skipping reviewer.
+2. Discover applicable reviewers and CI from repository configuration, recent
+   PRs, workflow path filters, and branch rules. Write the manifest outside
+   tracked files. Use each reviewer's native request mechanism and completion
+   evidence. Distinguish active integrations from stale workflow registry entries;
+   only require workflows that remain enabled under this skill's policy.
 3. Run `prepare --manifest FILE --inventory-confirmed`. It verifies remotes,
    synchronizes `powerhome/production-stack:main` with
    `vllm-project/production-stack:main` using `gh repo sync`, verifies parity,
@@ -104,6 +109,12 @@ observed integrations; discover the actual inventory for each update:
       "id": "codex",
       "adapter": "codex",
       "login": "chatgpt-codex-connector"
+    },
+    {
+      "id": "copilot",
+      "adapter": "submitted_review",
+      "login": "copilot-pull-request-reviewer[bot]",
+      "request_reviewer": "copilot-pull-request-reviewer[bot]"
     }
   ],
   "ci": [
@@ -117,16 +128,17 @@ observed integrations; discover the actual inventory for each update:
 }
 ```
 
-Additional reviewers use `check_run` with exact `name`, `app_slug`, and the
-review bot's `login` when it also submits comments, or
-`submitted_review` with exact bot `login`, only when those signals document a
-completed pass. Supply a documented comment command as `trigger` for either
-adapter. A check-run adapter may declare `terminal_conclusions` when its
-documented protocol distinguishes completed findings from execution failure;
-the default is `["success"]`. A submitted review with findings completes a
-pass even when it requests changes; CI and unresolved findings still gate merge.
+Use `check_run` with the check name and `app_slug`, or `submitted_review`
+with the bot's `login`. For a comment-triggered integration, set `trigger` to
+its documented command. For native GitHub review requests, set
+`request_reviewer` to its GitHub login, as shown for Copilot above. Native
+requests are deduplicated per published head and verified against GitHub's
+request timeline. Copilot may appear there as `Copilot`; verify its app identity
+rather than relying on its historical bot login or the requested-reviewers list.
+A submitted review with findings completes the pass; assess its findings before
+merging. Check-run adapters default to `terminal_conclusions: ["success"]`;
+set other conclusions only when the integration uses them for completed reviews.
 CI uses `check_run` with `app_slug`, or `status` with `creator_login`.
-An unknown completion protocol is a blocker, not permission to guess.
 List allowed downstream workflow file paths in `downstream_workflows`. An empty
 list means every `.yml` or `.yaml` workflow file is renamed with `.disabled`
 appended. Allowed files must exist in the trusted `powerhrg` base and must not
@@ -144,7 +156,7 @@ require CI from workflows that this policy disables.
 | `observe` | Return paginated feedback, evidence, gates, and a feedback digest. |
 | `observe --wait` | Observe with backoff for at most 20 minutes by default. |
 | `trigger-reviews` | Request missing reviews once per published-head round. |
-| `trigger-reviews --ready-early` | Mark ready early when a bot needs that trigger. |
+| `trigger-reviews --ready-early` | Mark the validated candidate ready and request final reviews. |
 | `address-thread --thread ID --outcome fixed --commit SHA --reason TEXT --defer` | Record a local fix decision without claiming it is published. |
 | `publish-fixes --feedback-digest DIGEST` | Recheck the round and push the validated fix batch once. |
 | `address-thread --thread ID --outcome fixed --commit SHA --reason TEXT` | Acknowledge a published fix, react, and resolve. |
@@ -153,13 +165,14 @@ require CI from workflows that this policy disables.
 | `ready --feedback-digest DIGEST` | Mark ready after final gates, then observe any triggered review. |
 | `merge --feedback-digest DIGEST` | Recheck final gates, merge the verified head, and prove ancestry. |
 
-The helper returns JSON and nonzero status for blockers. State lives in
+The helper returns JSON and a nonzero status when an operation needs attention.
+State lives in
 worktree-specific Git metadata, outside tracked files. Keep the manifest/state
 for resumption. Reconcile uncertain command outcomes before retrying. Do not
 work around a failed gate using raw push, resolution, or merge commands.
-If a new reviewer or CI signal is discovered, extend the manifest and rerun
-`prepare --manifest FILE --inventory-confirmed`; existing entries cannot be
-removed or weakened. After a verified merge, the next `prepare` archives the
+When a new applicable reviewer or CI signal appears, add it to the manifest and
+rerun `prepare --manifest FILE --inventory-confirmed`. Keep existing review and
+CI requirements intact. After a verified merge, the next `prepare` archives the
 previous workflow state and starts a new update.
 
 ## Draft PR and review batches
@@ -170,18 +183,19 @@ merge decisions, validation, caveats, and where review should start. The helper
 assigns `@bcdonadio` when permitted. Attach the returned PR URL to the chat if an
 artifact-attachment tool is available.
 
-Start as draft. Request missing reviews once with `trigger-reviews`. Early ready
-status is permitted when necessary to trigger a draft-skipping bot; it does not
-relax any merge gate. A ready transition may start a new review round. Observe
-after that transition and allow running automatic passes to finish; do not issue
-duplicate explicit requests while those passes are active.
+Start as draft and request missing reviews with `trigger-reviews`. After the
+initial findings are addressed and the candidate is validated, use
+`trigger-reviews --ready-early` to mark it ready and run final reviews on the
+published head. This combines readiness-triggered and final review passes;
+merge still requires current-head reviews, CI, and applicable human approvals.
+Observe after the transition and let active passes finish without duplicate
+requests.
 
 Bind each round to the published head and its trigger, while local fixes may
 advance local HEAD. Observe all expected bots, including code and security
-passes. The Codex adapter checks bot identity, the mutable summary's full
-`headSha` and completion marker, and both completed review rows with current
-trigger timestamps. A stale summary, silence, old approval/reaction, or unrelated
-CI check does not establish completion. Paginate unresolved outdated threads too.
+passes. The Codex adapter verifies each code and security pass from a submitted review
+or a completed summary row on the current commit after its trigger. Check the bot identity and exact commit. A stale summary alone,
+silence, an old approval/reaction, or unrelated CI does not establish completion. Paginate unresolved outdated threads too.
 
 Adjudicate incoming findings while reviews run. Make one fix commit per logical
 change; several related findings may share a commit. Record each pending thread
@@ -210,8 +224,9 @@ resuming. Supply the explanation itself to `--reason`; the helper adds the
 `Fixed in ...` or `Invalid because ...` prefix. Do not treat an outdated thread
 as automatically addressed.
 `observe --wait` has a 20-minute default window, finite API/process timeouts,
-and backoff. On timeout or missing evidence, preserve the draft/ready PR and
-local fixes, report the precise blocker, and resume when evidence changes.
+and backoff. On timeout, preserve the PR and local fixes, check the integration's
+status, and continue useful work. Report only a concrete external dependency
+that prevents further progress, with the exact action needed to resolve it.
 Never start unbounded watches or report completion with descendant processes
 still running. Never run `rm -f`.
 

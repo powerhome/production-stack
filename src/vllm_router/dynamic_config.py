@@ -68,6 +68,19 @@ class DynamicRouterConfig:
 
     # Routing logic configurations
     session_key: Optional[str] = None
+    lmcache_controller_port: int = 9000
+    lmcache_controller_reply_port: Optional[int] = None
+    lmcache_controller_heartbeat_port: Optional[int] = None
+    lmcache_health_check_interval: int = 5
+    lmcache_worker_timeout: int = 30
+    kv_aware_threshold: int = 2000
+    max_instance_failover_reroute_attempts: int = 0
+    prefix_min_match_length: int = 0
+    loadaware_beta: Optional[float] = None
+    priority_header: Optional[str] = "x-request-priority"
+    priority_field: Optional[str] = "priority"
+    priority_default: Optional[int] = 0
+    priority_threshold: Optional[int] = None
 
     # Logging Options
     callbacks: Optional[str] = None
@@ -103,6 +116,19 @@ class DynamicRouterConfig:
             # Routing logic configurations
             routing_logic=args.routing_logic,
             session_key=args.session_key,
+            lmcache_controller_port=args.lmcache_controller_port,
+            lmcache_controller_reply_port=args.lmcache_controller_reply_port,
+            lmcache_controller_heartbeat_port=args.lmcache_controller_heartbeat_port,
+            lmcache_health_check_interval=args.lmcache_health_check_interval,
+            lmcache_worker_timeout=args.lmcache_worker_timeout,
+            kv_aware_threshold=args.kv_aware_threshold,
+            max_instance_failover_reroute_attempts=args.max_instance_failover_reroute_attempts,
+            prefix_min_match_length=args.prefix_min_match_length,
+            loadaware_beta=args.loadaware_beta,
+            priority_header=args.priority_header,
+            priority_field=args.priority_field,
+            priority_default=args.priority_default,
+            priority_threshold=args.priority_threshold,
             # Logging Options
             callbacks=args.callbacks,
         )
@@ -212,7 +238,21 @@ class DynamicConfigWatcher(metaclass=SingletonMeta):
         Reconfigures the router with the given config.
         """
         routing_logic = reconfigure_routing_logic(
-            config.routing_logic, session_key=config.session_key
+            config.routing_logic,
+            session_key=config.session_key,
+            lmcache_controller_port=config.lmcache_controller_port,
+            lmcache_controller_reply_port=config.lmcache_controller_reply_port,
+            lmcache_controller_heartbeat_port=config.lmcache_controller_heartbeat_port,
+            lmcache_health_check_interval=config.lmcache_health_check_interval,
+            lmcache_worker_timeout=config.lmcache_worker_timeout,
+            kv_aware_threshold=config.kv_aware_threshold,
+            max_instance_failover_reroute_attempts=config.max_instance_failover_reroute_attempts,
+            prefix_min_match_length=config.prefix_min_match_length,
+            loadaware_beta=config.loadaware_beta,
+            priority_header=config.priority_header,
+            priority_field=config.priority_field,
+            priority_default=config.priority_default,
+            priority_threshold=config.priority_threshold,
         )
         self.app.state.router = routing_logic
         logger.info("DynamicConfigWatcher: Routing logic reconfiguration complete")
