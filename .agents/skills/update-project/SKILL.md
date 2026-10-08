@@ -19,15 +19,25 @@ validation proves the intended behavior. Invoking this skill authorizes its PR
 creation, review requests, replies, reactions, resolution, and eventual merge.
 Respect any narrower instruction in the current request.
 
-## Upstream trust
+## Workflow execution policy
 
-This workflow explicitly trusts `vllm-project/production-stack:main` and mirrors
-it into `powerhome/production-stack:main` before reviewing the downstream merge.
-That synchronization can immediately trigger upstream-controlled workflows,
-including access to configured CI secrets and self-hosted runners. The PR gates
-protect the later `powerhrg` integration; they do not isolate the upstream mirror
-from execution. This ordering and trust assumption are intentional. If upstream
-execution is no longer trusted, change the workflow design before invoking it.
+Keep the main-first mirror order, but disable all inherited upstream GitHub
+Actions workflows in the fork. Only explicitly allowlisted, downstream-owned
+workflows may run. Codex reviews and Portal checks are separate app integrations.
+
+`prepare` pauses repository Actions before synchronizing `main`, disables
+upstream/unlisted workflows, and cancels their pending or running executions.
+It proves the imported workflow paths are registered and disabled before
+restoring the repository's previous Actions setting. This closes the window in
+which a new upstream workflow could execute before being disabled individually.
+Previously disabled downstream workflows remain disabled; selected-action
+restrictions are preserved. It never changes the upstream repository's settings.
+
+Policy changes require repository Actions administration permissions. Missing
+permissions block synchronization. Incomplete registration, asynchronous run
+cancellation, or failed verification leaves Actions disabled with a recovery
+journal; rerun `prepare` after resolving the reported blocker. Never restore
+Actions manually while upstream workflow execution remains possible.
 
 ## Preparation and semantic merge
 
@@ -91,7 +101,8 @@ observed integrations; discover the actual inventory for each update:
       "source": "check_run",
       "app_slug": "powerhome-portal"
     }
-  ]
+  ],
+  "downstream_workflows": []
 }
 ```
 
@@ -105,6 +116,13 @@ the default is `["success"]`. A submitted review with findings completes a
 pass even when it requests changes; CI and unresolved findings still gate merge.
 CI uses `check_run` with `app_slug`, or `status` with `creator_login`.
 An unknown completion protocol is a blocker, not permission to guess.
+List allowed downstream workflow file paths in `downstream_workflows`. An empty
+list disables all repository Actions workflows. Allowed files must exist in the
+trusted `powerhrg` base and must not be present in the imported upstream source.
+Known GitHub-managed dynamic paths for Copilot and Dependabot may also be
+explicitly listed when their identity is verified in the fork's live registry.
+Discover expected CI from those allowed workflows and app integrations; do not
+require CI from workflows that this policy disables.
 
 | Subcommand | Use |
 | --- | --- |

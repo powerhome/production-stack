@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -22,6 +23,13 @@ import textwrap
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+
+policy_spec = importlib.util.spec_from_file_location(
+    "update_project_workflow_policy", Path(__file__).with_name("workflow_policy.py")
+)
+policy_module = importlib.util.module_from_spec(policy_spec)
+policy_spec.loader.exec_module(policy_module)
+WorkflowPolicy = policy_module.WorkflowPolicy
 
 SOURCE = "vllm-project/production-stack"
 DEST = "powerhome/production-stack"
@@ -358,9 +366,23 @@ def manifest(path):
         if c.get("source") == "status" and c.get("creator_login"):
             continue
         fail("CI context needs source and exact provider identity", {"name": c["name"]})
-    if set(data) != {"reviewers", "ci"}:
+    if set(data) - {"reviewers", "ci", "downstream_workflows"}:
         fail("manifest has unknown fields")
+    workflows = data.get("downstream_workflows", [])
+    if not isinstance(workflows, list) or any(
+        not isinstance(path, str) for path in workflows
+    ):
+        fail("downstream_workflows must be exact workflow file paths")
+    data.setdefault("downstream_workflows", [])
     return data
+
+
+def enforce_workflow_policy(config, source_sha, base_sha):
+    policy = WorkflowPolicy(
+        run=run, git=git, fail=fail, metadata_dir=state_path().parent
+    )
+    policy.begin(config.get("downstream_workflows", []), source_sha, base_sha)
+    return policy
 
 
 def prepare(args):
@@ -396,6 +418,10 @@ def prepare(args):
                         "inventory change may only add newly discovered signals",
                         {"field": field},
                     )
+            if state["manifest"].get("downstream_workflows", []) != config.get(
+                "downstream_workflows", []
+            ):
+                fail("active workflow downstream allowlist cannot change")
             state["manifest"] = config
             state["triggers"] = {}
             write_state(state)
@@ -428,8 +454,17 @@ def prepare(args):
         if git("symbolic-ref", "--short", "HEAD") != state["branch"]:
             clean()
             git("switch", state["branch"])
-        return {"status": "resumed", "state": state}
+        policy = enforce_workflow_policy(
+            config, state["upstream_sha"], state["base_sha"]
+        )
+        evidence = policy.finish(state["upstream_sha"], state["base_sha"])
+        return {"status": "resumed", "state": state, "workflow_policy": evidence}
     clean()
+    git("fetch", "origin", BASE, "main", "--no-tags")
+    git("fetch", "upstream", "main", "--no-tags")
+    source_before = git("rev-parse", "upstream/main")
+    base_before = git("rev-parse", "origin/" + BASE)
+    policy = enforce_workflow_policy(config, source_before, base_before)
     # gh repo sync is intentionally called without --force.
     run(
         ["gh", "repo", "sync", DEST, "--source", SOURCE, "--branch", "main"],
@@ -450,8 +485,14 @@ def prepare(args):
     ):
         fail("local remote-tracking parity not proved")
     base = git("rev-parse", "origin/" + BASE)
+    evidence = policy.finish(src, base)
     if ancestor(src, base):
-        return {"status": "noop", "upstream_sha": src, "base_sha": base}
+        return {
+            "status": "noop",
+            "upstream_sha": src,
+            "base_sha": base,
+            "workflow_policy": evidence,
+        }
     branch = "update-project/" + src[:12]
     exists = (
         run(
@@ -483,7 +524,7 @@ def prepare(args):
     }
     write_state(state)
     git("switch", "-c", branch, "origin/" + BASE)
-    return {"status": "prepared", "state": state}
+    return {"status": "prepared", "state": state, "workflow_policy": evidence}
 
 
 def pr_number(state):
@@ -904,10 +945,24 @@ def all_ci_result(snapshot, manifest):
         for r in manifest["reviewers"]
         if r["adapter"] == "check_run"
     }
+    allowed_paths = set(manifest.get("downstream_workflows", []))
+    disabled_runs = {
+        run["id"]
+        for run in snapshot["workflow_runs"]
+        if "downstream_workflows" in manifest
+        and run.get("path", "").split("@", 1)[0] not in allowed_paths
+    }
     checks = {}
     for c in snapshot["checks"]:
         key = (c.get("name"), c.get("app", {}).get("slug"))
         if key in review_checks:
+            continue
+        run_link = re.search(r"/actions/runs/(\d+)", c.get("details_url") or "")
+        if (
+            key[1] == "github-actions"
+            and run_link
+            and int(run_link.group(1)) in disabled_runs
+        ):
             continue
         prior = checks.get(key)
         if prior is None or c.get("id", 0) > prior.get("id", 0):
@@ -925,6 +980,8 @@ def all_ci_result(snapshot, manifest):
     for w in snapshot["workflow_runs"]:
         if w.get("head_sha") != snapshot["pr"]["head"]["sha"]:
             continue
+        if w["id"] in disabled_runs:
+            continue
         key = w.get("workflow_id")
         prior = workflows.get(key)
         if prior is None or (w.get("created_at") or "", w.get("id", 0)) > (
@@ -933,6 +990,7 @@ def all_ci_result(snapshot, manifest):
         ):
             workflows[key] = w
     return {
+        "excluded_disabled_workflow_run_ids": sorted(disabled_runs),
         "checks": [
             {
                 "name": k[0],
@@ -1751,6 +1809,14 @@ def main():
             output = prepare(args)
         else:
             state = read_state()
+            if args.command != "observe":
+                WorkflowPolicy(
+                    run=run, git=git, fail=fail, metadata_dir=state_path().parent
+                ).audit(
+                    state["upstream_sha"],
+                    state["base_sha"],
+                    state["manifest"].get("downstream_workflows", []),
+                )
             action = {
                 "open-pr": open_pr,
                 "observe": observe,
