@@ -25,12 +25,14 @@ helm upgrade -i \
   --set inferenceExtension.enabled=true \
   agentgateway oci://cr.agentgateway.dev/charts/agentgateway
 
+kubectl create namespace "${INFERENCE_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply --namespace "${INFERENCE_NAMESPACE}" \
   -f "${SCRIPT_DIR}/configs/vllm/gpu-deployment.yaml"
 kubectl apply --namespace "${INFERENCE_NAMESPACE}" \
   -f "${SCRIPT_DIR}/configs/gateway/agentgateway/gateway.yaml"
 
-helm upgrade -i vllm-llama3-1b-instruct \
+helm upgrade -i --create-namespace vllm-llama3-1b-instruct \
   oci://ghcr.io/llm-d/charts/llm-d-router-gateway \
   --namespace "${INFERENCE_NAMESPACE}" \
   --version "${LLM_D_ROUTER_VERSION}" \
