@@ -1,5 +1,11 @@
 # Tutorial: Priority-Based Routing
 
+> **Trust boundary:** Priority routing accepts the caller's header or body value;
+> it does not authorize service tiers. For a public or multi-tenant endpoint,
+> use an authenticated gateway that strips caller-supplied priority headers and
+> body fields and sets the priority from trusted policy. Restrict direct access
+> to the router so clients cannot bypass that gateway.
+
 ## Introduction
 
 This tutorial demonstrates how to use priority-based routing in the vLLM Production Stack. Priority routing lets you mark individual requests as more important than others — via a request header or a body field — so that the router steers them to the least-loaded serving engine, and forwards the priority value to vLLM so its native priority scheduler can preempt lower-priority work within the engine. This is useful for tiered service levels (e.g. premium vs. free traffic), keeping interactive requests responsive under batch load, or protecting health/readiness probes when the cluster is busy.
