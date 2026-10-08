@@ -86,6 +86,7 @@ This table documents all available configuration values for the Production Stack
 | `servingEngineSpec.modelSpec[].labels` | map | `{}` | (Optional) Additional labels to add to the deployment |
 | `servingEngineSpec.modelSpec[].podLabels` | map | `{}` | (Optional) Additional labels to add to the pods |
 | `servingEngineSpec.modelSpec[].name` | string | `""` | The name of the model, e.g., "example-model" |
+| `servingEngineSpec.modelSpec[].debug` | boolean | `false` | Enable verbose vLLM arguments, debug environment variables, and middleware mounts; see the custom-command note below |
 | `servingEngineSpec.modelSpec[].repository` | string | `""` | The repository of the model, e.g., "vllm/vllm-openai" |
 | `servingEngineSpec.modelSpec[].tag` | string | `""` | The tag of the model, e.g., "latest" |
 | `servingEngineSpec.modelSpec[].imagePullSecret` | string | `""` | (Optional) Name of secret with credentials to private container repository |
@@ -126,6 +127,11 @@ This table documents all available configuration values for the Production Stack
 | `servingEngineSpec.modelSpec[].nodeSelectorTerms` | list | - | (Optional) Node selector terms |
 | `servingEngineSpec.modelSpec[].tolerations` | list | - | (Optional) Per-model tolerations. Merged with or replaces `servingEngineSpec.tolerations` according to `tolerationsPolicy` |
 | `servingEngineSpec.modelSpec[].tolerationsPolicy` | string | `"append"` | (Optional) How per-model tolerations interact with global tolerations. `"append"` unions both lists; `"override"` replaces global tolerations entirely for this model |
+
+When `modelSpec[].command` is set, the chart preserves that command exactly.
+With a custom command, `debug: true` still supplies the debug environment and
+middleware mount, but does not append startup flags. Add the desired debug and
+`--middleware` arguments explicitly through `command` or `args`.
 
 #### Init Container Configuration
 
