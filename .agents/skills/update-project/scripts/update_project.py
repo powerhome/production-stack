@@ -917,6 +917,33 @@ def codex_result(snapshot, reviewer, trigger):
         if relevant
         else None
     )
+    submitted = {}
+    for review in snapshot.get("reviews", []):
+        if (
+            review.get("user", {}).get("type") != "Bot"
+            or review.get("user", {}).get("login", "").removesuffix("[bot]")
+            != reviewer["login"]
+            or review.get("commit_id") != head
+            or review.get("state") not in ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")
+        ):
+            continue
+        title = re.search(
+            r"^### [^\n]*?Codex(?P<security> Security)? Review\b",
+            review.get("body") or "",
+            re.M,
+        )
+        if not title:
+            continue
+        label = "Security Review" if title.group("security") else "Code Review"
+        label_trigger = trigger.get(label) if isinstance(trigger, dict) else trigger
+        if after(review.get("submitted_at"), label_trigger):
+            submitted[label] = review["id"]
+    if len(submitted) == 2:
+        return {
+            "status": "complete",
+            "evidence_ids": list(submitted.values()),
+            "reason": "both passes submitted for current SHA after their triggers",
+        }
     status = "complete" if newest and newest["id"] in matched else "pending"
     return {
         "status": status,
