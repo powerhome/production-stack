@@ -1488,6 +1488,18 @@ def branch_rules():
     return protection, rulesets
 
 
+def requires_approval(settings):
+    """A PR rule with zero required approvals need not produce APPROVED."""
+    if not settings:
+        return False
+    return (
+        settings.get("required_approving_review_count", 0) > 0
+        or settings.get("require_code_owner_reviews", False)
+        or settings.get("require_code_owner_review", False)
+        or settings.get("require_last_push_approval", False)
+    )
+
+
 def merge(args, state):
     verify_repo()
     current_branch(state)
@@ -1538,7 +1550,9 @@ def merge(args, state):
         )
     protection, rulesets = branch_rules()
     required = set(protection.get("required_status_checks", {}).get("contexts") or [])
-    approval_required = bool(protection.get("required_pull_request_reviews"))
+    approval_required = requires_approval(
+        protection.get("required_pull_request_reviews")
+    )
     for rule in rulesets:
         if rule.get("type") == "required_status_checks":
             required.update(
@@ -1547,7 +1561,9 @@ def merge(args, state):
                 if x.get("context")
             )
         if rule.get("type") == "pull_request":
-            approval_required = True
+            approval_required = approval_required or requires_approval(
+                rule.get("parameters")
+            )
     expected = {c["name"] for c in state["manifest"]["ci"]}
     if not required.issubset(expected):
         fail(
