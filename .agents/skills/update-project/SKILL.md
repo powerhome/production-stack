@@ -191,9 +191,8 @@ duplicate explicit requests while those passes are active.
 
 Bind each round to the published head and its trigger, while local fixes may
 advance local HEAD. Observe all expected bots, including code and security
-passes. The Codex adapter accepts both submitted code and security reviews on the
-current commit after their triggers, or a current summary with both passes
-completed. Check the bot identity and exact commit. A stale summary alone,
+passes. The Codex adapter verifies each code and security pass from a submitted review
+or a completed summary row on the current commit after its trigger. Check the bot identity and exact commit. A stale summary alone,
 silence, an old approval/reaction, or unrelated CI does not establish completion. Paginate unresolved outdated threads too.
 
 Adjudicate incoming findings while reviews run. Make one fix commit per logical

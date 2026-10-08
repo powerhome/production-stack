@@ -860,6 +860,7 @@ def codex_result(snapshot, reviewer, trigger):
     ]
     matched = []
     relevant = []
+    summary_passes = {}
     for c in comments:
         body = c.get("body") or ""
         if "codex-security-review:v1" not in body:
@@ -890,7 +891,7 @@ def codex_result(snapshot, reviewer, trigger):
                 or len(row.split("|")) < 5
                 or not re.search(r"\*\*Completed\*\*", row, re.I)
             ):
-                break
+                continue
             match_time = re.search(r'<relative-time\s+datetime="([^"]+)"', row)
             sha_cell = row.split("|")[3]
             match_sha = re.search(r"`([0-9a-f]{7,40})`", sha_cell)
@@ -901,7 +902,7 @@ def codex_result(snapshot, reviewer, trigger):
                 or not head.startswith(match_sha.group(1))
                 or not after(match_time.group(1), label_trigger)
             ):
-                break
+                continue
             rows.append(
                 {
                     "label": label,
@@ -909,9 +910,9 @@ def codex_result(snapshot, reviewer, trigger):
                     "sha": match_sha.group(1),
                 }
             )
-        if len(rows) != 2:
-            continue
-        matched.append(c["id"])
+        summary_passes[c["id"]] = {row["label"] for row in rows}
+        if len(rows) == 2:
+            matched.append(c["id"])
     newest = (
         max(relevant, key=lambda c: (c.get("updated_at") or "", c.get("id", 0)))
         if relevant
@@ -938,11 +939,13 @@ def codex_result(snapshot, reviewer, trigger):
         label_trigger = trigger.get(label) if isinstance(trigger, dict) else trigger
         if after(review.get("submitted_at"), label_trigger):
             submitted[label] = review["id"]
-    if len(submitted) == 2:
+    summary_labels = summary_passes.get(newest["id"], set()) if newest else set()
+    if set(submitted) | summary_labels == {"Code Review", "Security Review"}:
         return {
             "status": "complete",
-            "evidence_ids": list(submitted.values()),
-            "reason": "both passes submitted for current SHA after their triggers",
+            "evidence_ids": list(submitted.values())
+            + ([newest["id"]] if summary_labels else []),
+            "reason": "both passes verified for current SHA after their triggers",
         }
     status = "complete" if newest and newest["id"] in matched else "pending"
     return {
