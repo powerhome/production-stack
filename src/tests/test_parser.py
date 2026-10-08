@@ -241,3 +241,59 @@ def test_prefix_threshold_survives_dynamic_reload(tmp_path, file_type):
         assert watcher.app.state.router.prefix_min_match_length == 64
     finally:
         cleanup_routing_logic()
+
+
+@pytest.mark.parametrize("file_type", ["yaml", "json"])
+def test_loadaware_reload_preserves_controller_settings(
+    tmp_path, file_type, monkeypatch
+):
+    from types import SimpleNamespace
+    from vllm_router.dynamic_config import DynamicConfigWatcher, DynamicRouterConfig
+    import vllm_router.routers.routing_logic as routing_logic
+
+    manager = MagicMock()
+    monkeypatch.setattr(
+        routing_logic,
+        "controller_manager",
+        SimpleNamespace(LMCacheControllerManager=manager),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        routing_logic.LoadAwareRouter, "start_kv_manager", lambda self: None
+    )
+    payload = {
+        "service_discovery": "static",
+        "routing_logic": "loadaware",
+        "lmcache_controller_port": 9011,
+        "lmcache_controller_reply_port": 9012,
+        "lmcache_controller_heartbeat_port": 9013,
+        "lmcache_health_check_interval": 7,
+        "lmcache_worker_timeout": 40,
+        "kv_aware_threshold": 2300,
+        "max_instance_failover_reroute_attempts": 4,
+        "loadaware_beta": 0.4,
+    }
+    path = tmp_path / ("router." + file_type)
+    path.write_text(
+        yaml.safe_dump(payload) if file_type == "yaml" else json.dumps(payload)
+    )
+    config = getattr(DynamicRouterConfig, "from_" + file_type)(str(path))
+    config = DynamicRouterConfig.from_args(argparse.Namespace(**vars(config)))
+    watcher = object.__new__(DynamicConfigWatcher)
+    watcher.app = SimpleNamespace(state=SimpleNamespace())
+    try:
+        watcher.reconfigure_routing_logic(config)
+        manager.assert_called_once_with(
+            {
+                "pull": "0.0.0.0:9011",
+                "reply": "0.0.0.0:9012",
+                "heartbeat": "0.0.0.0:9013",
+            },
+            health_check_interval=7,
+            lmcache_worker_timeout=40,
+        )
+        assert watcher.app.state.router.threshold == 2300
+        assert watcher.app.state.router.beta == 0.4
+        assert watcher.app.state.router.max_instance_failover_reroute_attempts == 4
+    finally:
+        routing_logic.cleanup_routing_logic()
